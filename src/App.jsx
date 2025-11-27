@@ -1048,7 +1048,7 @@ export default function App() {
             </div>
 
             <div className="footer">
-              <div className="muted">Made with ❤️ • soft card UI</div>
+              <div className="muted">Made with ❤️ in Panathur, Bangalore</div>
               <div style={{ display:"flex", gap:8 }}>
                 <button className="btn-outline" onClick={() => { 
                   const url = `${window.location.origin}${window.location.pathname}?room=${currentRoomId}`;
