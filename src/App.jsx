@@ -1,22 +1,33 @@
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
-import { Loader2, Zap, Heart, Star, Send, UserPlus, Trash2, Trophy, Crown, Calendar, Clock, BarChart } from 'lucide-react';
+import { Loader2, Zap, Trophy, Crown, Calendar, Clock, BarChart, Search, UserPlus, Trash2, Github, Sword, AlertTriangle } from 'lucide-react';
 
 // --- Firebase Imports ---
-import { initializeApp } from 'firebase/app';
+// FIX 1: Import getApps and getApp to prevent duplicate initialization
+import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, doc, setDoc, getDoc, onSnapshot } from 'firebase/firestore';
 
+/**
+ * --- CONFIGURATION INSTRUCTIONS ---
+ * Paste your firebaseConfig below as you did before.
+ */
 // Global variables
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-const firebaseConfig = {
-  apiKey: "AIzaSyBxavKvL3A5jhjoY6hCQpHaxd1ZP26lUII",
-  authDomain: "leetcode-battle.firebaseapp.com",
-  projectId: "leetcode-battle",
-  storageBucket: "leetcode-battle.firebasestorage.app",
-  messagingSenderId: "523071405286",
-  appId: "1:523071405286:web:7e45767fb5e3fb031fcf27",
-  measurementId: "G-B47VPQVG2J"
-};
+
+// REPLACE THIS SECTION WHEN HOSTING LOCALLY
+const firebaseConfig = typeof __firebase_config !== 'undefined'
+  ? JSON.parse(__firebase_config)
+  : {
+      // Paste your actual Firebase Config keys here if running locally
+      apiKey: "AIzaSyBxavKvL3A5jhjoY6hCQpHaxd1ZP26lUII",
+      authDomain: "leetcode-battle.firebaseapp.com",
+      projectId: "leetcode-battle",
+      storageBucket: "leetcode-battle.firebasestorage.app",
+      messagingSenderId: "523071405286",
+      appId: "1:523071405286:web:7e45767fb5e3fb031fcf27",
+      measurementId: "G-B47VPQVG2J"
+    };
+
 const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
 // --- API Configuration ---
@@ -35,41 +46,72 @@ const App = () => {
   const [leaderboardData, setLeaderboardData] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [appStatus, setAppStatus] = useState("Ready to start battle!");
+  const [appStatus, setAppStatus] = useState("Ready to battle");
 
-  // New State for Time Filter
-  const [timeFilter, setTimeFilter] = useState('all'); // 'all', 'weekly', 'daily'
-// Old line
-// const FRIENDS_DOC_PATH = currentUserId ? `/artifacts/${appId}/users/${currentUserId}/friends/list` : null;
+  // Time Filter State
+  const [timeFilter, setTimeFilter] = useState('all');
 
-// New line (Cleaner for personal hosting)
-const FRIENDS_DOC_PATH = currentUserId ? `users/${currentUserId}/friends/list` : null;
+  // Path Logic
+  const FRIENDS_DOC_PATH = currentUserId
+    ? (typeof __app_id !== 'undefined'
+        ? `/artifacts/${appId}/users/${currentUserId}/friends/list`
+        : `users/${currentUserId}/friends/list`)
+    : null;
 
   // 1. Initialize Firebase
   useEffect(() => {
-    if (firebaseConfig) {
-      const app = initializeApp(firebaseConfig);
-      const firestore = getFirestore(app);
-      const authentication = getAuth(app);
-      setDb(firestore);
-      setAuth(authentication);
-      const unsubscribe = onAuthStateChanged(authentication, async (user) => {
-        if (user) {
-          setCurrentUserId(user.uid);
-        } else if (initialAuthToken) {
-          await signInWithCustomToken(authentication, initialAuthToken);
-        } else {
-          await signInAnonymously(authentication);
-        }
-        setIsAuthReady(true);
-      });
-      return () => unsubscribe();
+    if (firebaseConfig && Object.keys(firebaseConfig).length > 0) {
+      try {
+        // FIX 2: Check if app is already initialized.
+        // If length === 0, create it. If not, get the existing one.
+        const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
+
+        const firestore = getFirestore(app);
+        const authentication = getAuth(app);
+        setDb(firestore);
+        setAuth(authentication);
+
+        // Add a timeout to warn if Auth takes too long
+        const timeoutId = setTimeout(() => {
+             if (!isAuthReady) {
+                 setError("Connection timed out. Please check your internet or Firebase Config.");
+             }
+        }, 10000);
+
+        const unsubscribe = onAuthStateChanged(authentication, async (user) => {
+          clearTimeout(timeoutId); // Clear timeout on response
+          try {
+            if (user) {
+                setCurrentUserId(user.uid);
+            } else if (initialAuthToken) {
+                await signInWithCustomToken(authentication, initialAuthToken);
+            } else {
+                // This is where it likely fails if Anonymous auth is off
+                await signInAnonymously(authentication);
+            }
+            setIsAuthReady(true);
+          } catch (err) {
+            console.error("Auth Failure:", err);
+            // This ensures the error is visible on the black screen
+            setError(`Authentication Failed: ${err.message}. (Did you enable Anonymous Auth in Firebase Console?)`);
+          }
+        });
+        return () => {
+            unsubscribe();
+            clearTimeout(timeoutId);
+        };
+      } catch (e) {
+        console.error("Firebase Init Error:", e);
+        setError("Database connection failed. Check your config keys.");
+      }
+    } else {
+        setError("Firebase configuration is missing in the code.");
     }
   }, []);
 
   // 2. Load Friends
   useEffect(() => {
-    if (!db || !currentUserId) return;
+    if (!db || !currentUserId || !FRIENDS_DOC_PATH) return;
     const docRef = doc(db, FRIENDS_DOC_PATH);
     const unsubscribe = onSnapshot(docRef, (docSnap) => {
         if (docSnap.exists()) {
@@ -77,6 +119,9 @@ const FRIENDS_DOC_PATH = currentUserId ? `users/${currentUserId}/friends/list` :
         } else {
             setFriendUsernames([]);
         }
+    }, (err) => {
+        console.error("Firestore Error:", err);
+        // Don't block the UI for this, just log it
     });
     return () => unsubscribe();
   }, [db, currentUserId, FRIENDS_DOC_PATH]);
@@ -94,7 +139,6 @@ const FRIENDS_DOC_PATH = currentUserId ? `users/${currentUserId}/friends/list` :
   }, [db, currentUserId, FRIENDS_DOC_PATH]);
 
   // --- Logic Helpers ---
-
   const fetchWithRetry = useCallback(async (url) => {
     let retries = 0;
     while (retries < 3) {
@@ -110,9 +154,7 @@ const FRIENDS_DOC_PATH = currentUserId ? `users/${currentUserId}/friends/list` :
     }
   }, []);
 
-  // Helper to process submissions for Daily/Weekly Solved Counts
   const processRecentSubmissions = (submissionResponse) => {
-    // API might return { count: 20, submission: [...] } or just the array depending on version
     const submissions = Array.isArray(submissionResponse)
         ? submissionResponse
         : (submissionResponse?.submission || []);
@@ -120,81 +162,59 @@ const FRIENDS_DOC_PATH = currentUserId ? `users/${currentUserId}/friends/list` :
     const now = Math.floor(Date.now() / 1000);
     const oneDaySeconds = 86400;
     const oneWeekSeconds = oneDaySeconds * 7;
-
-    // Get start of today (UTC) - LeetCode resets at 00:00 UTC
     const todayStart = now - (now % oneDaySeconds);
 
     const dailySolvedSet = new Set();
     const weeklySolvedSet = new Set();
 
     submissions.forEach(sub => {
-        // Only count Accepted solutions
         if (sub.statusDisplay !== 'Accepted') return;
-
         const timestamp = parseInt(sub.timestamp);
-
-        // Daily: timestamps falling within the current UTC day
-        if (timestamp >= todayStart) {
-            dailySolvedSet.add(sub.title);
-        }
-        // Weekly: timestamps within last 7 days
-        if (timestamp >= (now - oneWeekSeconds)) {
-            weeklySolvedSet.add(sub.title);
-        }
+        if (timestamp >= todayStart) dailySolvedSet.add(sub.title);
+        if (timestamp >= (now - oneWeekSeconds)) weeklySolvedSet.add(sub.title);
     });
 
-    return {
-        daily: dailySolvedSet.size,
-        weekly: weeklySolvedSet.size
-    };
+    return { daily: dailySolvedSet.size, weekly: weeklySolvedSet.size };
   };
 
   // 4. Fetch All User Data
   const fetchAllUsersData = useCallback(async () => {
     if (friendUsernames.length === 0) {
       setLeaderboardData([]);
-      setAppStatus("Add usernames to start the battle!");
+      setAppStatus("Add usernames to start");
       return;
     }
 
     setLoading(true);
-    setAppStatus(`Fetching data for ${friendUsernames.length} coders...`);
+    setAppStatus(`Scouting ${friendUsernames.length} fighters...`);
 
     const promises = friendUsernames.map(async (user) => {
         try {
-            // Fetch Profile, All-Time Solved Stats, and Recent Submissions
-            // We request limit=50 to get a good buffer for weekly stats
             const [profileData, solvedData, submissionData] = await Promise.all([
                 fetchWithRetry(`${API_BASE_URL}/${user}`),
                 fetchWithRetry(`${API_BASE_URL}/${user}/solved`),
                 fetchWithRetry(`${API_BASE_URL}/${user}/submission?limit=50`)
             ]);
 
-            if (profileData.errors || solvedData.errors) {
-                 return { username: user, error: "User not found" };
-            }
+            if (profileData.errors || solvedData.errors) return { username: user, error: "User not found" };
 
-            const easy = solvedData.easySolved || 0;
-            const medium = solvedData.mediumSolved || 0;
-            const hard = solvedData.hardSolved || 0;
-            const totalAllTime = solvedData.solvedProblem || 0;
-
-            // Calculate time-based unique solved counts
             const { daily, weekly } = processRecentSubmissions(submissionData);
 
             return {
                 username: user,
                 avatar: profileData.avatar,
-                stats: { easy, medium, hard },
+                stats: {
+                  easy: solvedData.easySolved || 0,
+                  medium: solvedData.mediumSolved || 0,
+                  hard: solvedData.hardSolved || 0
+                },
                 counts: {
-                    all: totalAllTime,
+                    all: solvedData.solvedProblem || 0,
                     weekly: weekly,
                     daily: daily
                 }
             };
-
         } catch (e) {
-            console.error(`Error fetching ${user}:`, e);
             return { username: user, error: "Fetch failed" };
         }
     });
@@ -204,105 +224,112 @@ const FRIENDS_DOC_PATH = currentUserId ? `users/${currentUserId}/friends/list` :
 
     setLeaderboardData(validResults);
     setLoading(false);
-    setAppStatus(`Leaderboard updated!`);
-
-    if (results.some(r => r.error)) setError("Some users could not be fetched.");
+    setAppStatus(`Battle Updated`);
+    if (results.some(r => r.error)) setError("Some users were unreachable.");
 
   }, [friendUsernames, fetchWithRetry]);
 
-  // Refetch when friends change or auth ready
   useEffect(() => {
     if (isAuthReady) fetchAllUsersData();
   }, [friendUsernames, isAuthReady, fetchAllUsersData]);
 
-  // Sort Data based on selected TimeFilter
   const sortedLeaderboard = useMemo(() => {
     return [...leaderboardData].sort((a, b) => {
         const countA = a.counts[timeFilter];
         const countB = b.counts[timeFilter];
-
-        // Sort by count descending
         if (countB !== countA) return countB - countA;
-
-        // Tie-breaker: All time solved
         return b.counts.all - a.counts.all;
     });
   }, [leaderboardData, timeFilter]);
 
   // --- Components ---
 
-  const StatPill = ({ difficulty, count, color }) => (
-    <span className={`px-2 py-0.5 rounded-full text-xs font-semibold bg-${color}-900 text-${color}-300`}>
-      {difficulty}: {count}
-    </span>
+  const StatBadge = ({ label, count, colorClass }) => (
+    <div className={`flex items-center space-x-1 px-2 py-0.5 rounded-md ${colorClass} bg-opacity-10 border border-opacity-20 border-current`}>
+      <span className="text-[10px] font-bold uppercase tracking-wider opacity-80">{label}</span>
+      <span className="text-xs font-bold">{count}</span>
+    </div>
   );
 
   const FilterTab = ({ id, label, icon: Icon }) => (
     <button
       onClick={() => setTimeFilter(id)}
-      className={`flex items-center space-x-2 px-4 py-2 rounded-lg font-medium transition-all duration-200 ${
+      className={`relative flex items-center justify-center space-x-2 px-6 py-2.5 rounded-full font-semibold transition-all duration-300 ${
         timeFilter === id
-        ? 'bg-blue-600 text-white shadow-lg scale-105'
-        : 'bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-white'
+        ? 'text-white shadow-[0_0_20px_rgba(59,130,246,0.5)] bg-gradient-to-r from-blue-600 to-indigo-600 scale-105'
+        : 'text-slate-400 hover:text-white hover:bg-white/5'
       }`}
     >
       <Icon className="h-4 w-4" />
       <span>{label}</span>
+      {timeFilter === id && (
+        <span className="absolute -bottom-1 left-1/2 transform -translate-x-1/2 w-1/2 h-0.5 bg-blue-400 blur-[2px]"></span>
+      )}
     </button>
   );
 
   const LeaderboardRow = ({ user, rank }) => {
     const count = user.counts[timeFilter];
 
-    // Dynamic styling for rank
-    const rankColor = rank === 1 ? 'text-yellow-400' :
-                      rank === 2 ? 'text-gray-400' :
-                      rank === 3 ? 'text-amber-700' : 'text-gray-400';
+    // Rank Styling
+    let rankStyles = "border-slate-700/50 bg-slate-800/40";
+    let textGlow = "";
+    let medal = null;
 
-    const rankBg = rank === 1 ? 'bg-gradient-to-r from-yellow-900/40 to-gray-800 border-l-4 border-yellow-500' :
-                   rank === 2 ? 'bg-gray-800 border-l-4 border-gray-400' :
-                   rank === 3 ? 'bg-gray-800 border-l-4 border-amber-700' :
-                   'bg-gray-800 hover:bg-gray-750';
+    if (rank === 1) {
+      rankStyles = "border-yellow-500/50 bg-gradient-to-r from-yellow-500/10 to-transparent shadow-[0_0_30px_rgba(234,179,8,0.1)]";
+      textGlow = "drop-shadow-[0_0_10px_rgba(234,179,8,0.5)]";
+      medal = <Crown className="h-6 w-6 text-yellow-400 fill-yellow-400 animate-pulse" />;
+    } else if (rank === 2) {
+      rankStyles = "border-slate-300/50 bg-gradient-to-r from-slate-300/10 to-transparent";
+      medal = <Trophy className="h-5 w-5 text-slate-300" />;
+    } else if (rank === 3) {
+      rankStyles = "border-amber-700/50 bg-gradient-to-r from-amber-700/10 to-transparent";
+      medal = <Trophy className="h-5 w-5 text-amber-700" />;
+    }
 
     return (
-      <div className={`flex items-center p-4 rounded-xl shadow-md transition duration-300 ${rankBg} mb-3`}>
-
-        {/* Rank */}
-        <div className="flex flex-col items-center justify-center w-12 flex-shrink-0 mr-2">
-          {rank <= 3 ? <Trophy className={`h-6 w-6 ${rankColor} mb-1`} /> : <span className="h-6 block"></span>}
-          <span className={`text-xl font-extrabold ${rankColor}`}>#{rank}</span>
+      <div className={`group relative flex items-center p-4 rounded-2xl border backdrop-blur-md transition-all duration-300 hover:scale-[1.01] hover:bg-slate-800/60 ${rankStyles} mb-4`}>
+        {/* Rank Number */}
+        <div className="w-12 flex flex-col items-center justify-center mr-4 flex-shrink-0">
+          {medal}
+          <span className={`text-2xl font-black ${rank === 1 ? 'text-yellow-400' : 'text-slate-500'} ${textGlow}`}>
+            #{rank}
+          </span>
         </div>
 
-        {/* User */}
+        {/* User Info */}
         <div className="flex items-center flex-grow min-w-0">
-          <img
-            src={user.avatar || `https://placehold.co/50x50/374151/ffffff?text=${user.username.charAt(0)}`}
-            alt="avatar"
-            className="w-12 h-12 rounded-full object-cover border-2 border-gray-600 shadow-sm mr-4 flex-shrink-0"
-          />
-          <div className="min-w-0">
-            <h3 className="text-lg font-bold text-white truncate flex items-center">
+          <div className="relative">
+            <img
+              src={user.avatar || `https://placehold.co/100x100/1e293b/ffffff?text=${user.username.charAt(0)}`}
+              alt="avatar"
+              className={`w-14 h-14 rounded-full object-cover border-2 shadow-lg ${rank === 1 ? 'border-yellow-500' : 'border-slate-600'}`}
+            />
+            {rank === 1 && <div className="absolute inset-0 rounded-full shadow-[0_0_20px_rgba(234,179,8,0.4)]"></div>}
+          </div>
+
+          <div className="ml-4 min-w-0">
+            <h3 className={`text-lg font-bold text-white truncate group-hover:text-blue-400 transition-colors ${rank === 1 ? 'text-xl' : ''}`}>
                 {user.username}
-                {rank === 1 && <Crown className="h-4 w-4 ml-2 text-yellow-400 animate-pulse" />}
             </h3>
-            {/* Show difficulty breakdown only on 'all' view or as secondary info */}
-            <div className="flex space-x-2 mt-1">
-                <StatPill difficulty="E" count={user.stats.easy} color="green" />
-                <StatPill difficulty="M" count={user.stats.medium} color="orange" />
-                <StatPill difficulty="H" count={user.stats.hard} color="red" />
+            <div className="flex space-x-2 mt-1.5">
+                <StatBadge label="Easy" count={user.stats.easy} colorClass="text-emerald-400 bg-emerald-400 border-emerald-500" />
+                <StatBadge label="Med" count={user.stats.medium} colorClass="text-amber-400 bg-amber-400 border-amber-500" />
+                <StatBadge label="Hard" count={user.stats.hard} colorClass="text-rose-400 bg-rose-400 border-rose-500" />
             </div>
           </div>
         </div>
 
-        {/* Count Metric */}
-        <div className="text-right flex-shrink-0 ml-4">
-          <p className="text-xs text-gray-400 uppercase tracking-wider mb-0.5">
-            {timeFilter === 'all' ? 'All Time' : 'Solved'}
+        {/* Score Metric */}
+        <div className="text-right flex-shrink-0 ml-4 pl-4 border-l border-slate-700/50">
+          <p className="text-[10px] uppercase tracking-widest text-slate-400 font-semibold mb-1">
+            {timeFilter === 'all' ? 'Total Solved' : 'Solved'}
           </p>
-          <p className={`text-3xl font-black ${
-              timeFilter === 'daily' ? 'text-green-400' :
+          <p className={`text-4xl font-black tabular-nums tracking-tight ${
+              timeFilter === 'daily' ? 'text-emerald-400' :
               timeFilter === 'weekly' ? 'text-blue-400' : 'text-purple-400'
-          }`}>
+          } ${rank === 1 ? 'drop-shadow-[0_0_10px_rgba(168,85,247,0.5)]' : ''}`}>
             {count}
           </p>
         </div>
@@ -310,105 +337,154 @@ const FRIENDS_DOC_PATH = currentUserId ? `users/${currentUserId}/friends/list` :
     );
   };
 
-  const FriendListItem = ({ username }) => (
-    <div className="flex justify-between items-center bg-gray-700/50 p-2 px-3 rounded-md hover:bg-gray-700 transition">
-        <span className="font-medium text-gray-300 text-sm">{username}</span>
-        <button onClick={() => {
-            const newUsers = friendUsernames.filter(u => u !== username);
-            saveFriendsList(newUsers);
-        }} className="text-gray-500 hover:text-red-400">
-            <Trash2 className="h-4 w-4" />
-        </button>
-    </div>
-  );
-
-  // Loading Screen
+  // Loading View
   if (!isAuthReady) {
     return (
-        <div className="min-h-screen bg-gray-900 flex flex-col items-center justify-center p-4">
-            <Loader2 className="animate-spin h-10 w-10 text-blue-500 mb-4" />
-            <p className="text-gray-400">Syncing Battle Data...</p>
+        <div className="min-h-screen bg-[#0B0F19] flex flex-col items-center justify-center relative overflow-hidden p-6 text-center">
+             {/* Background Glows */}
+             <div className="absolute top-0 left-0 w-96 h-96 bg-blue-500/20 rounded-full blur-[100px]"></div>
+             <div className="absolute bottom-0 right-0 w-96 h-96 bg-purple-500/20 rounded-full blur-[100px]"></div>
+
+            <Loader2 className="animate-spin h-12 w-12 text-blue-500 mb-6 relative z-10" />
+            <h2 className="text-2xl font-bold text-white tracking-widest uppercase relative z-10 mb-2">Initializing Battle...</h2>
+
+            {error && (
+              <div className="mt-8 relative z-20 bg-red-900/40 border border-red-500/50 p-6 rounded-xl max-w-lg backdrop-blur-md shadow-2xl">
+                 <div className="flex items-center justify-center space-x-2 mb-2 text-red-400">
+                    <AlertTriangle className="h-6 w-6" />
+                    <h3 className="text-lg font-bold">Connection Error</h3>
+                 </div>
+                 <p className="text-slate-200">{error}</p>
+              </div>
+            )}
         </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gray-900 text-gray-100 p-4 sm:p-6 font-sans">
-      <header className="flex flex-col md:flex-row justify-between items-center mb-8 bg-gray-800 p-6 rounded-2xl shadow-xl border border-gray-700">
-        <div>
-            <h1 className="text-4xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-purple-500">
-            LeetCode Battle
-            </h1>
-            <p className="text-gray-400 mt-1 text-sm">{appStatus}</p>
-        </div>
+    <div className="min-h-screen bg-[#0B0F19] text-slate-200 font-sans selection:bg-blue-500 selection:text-white relative overflow-x-hidden">
 
-        {/* Time Filters */}
-        <div className="flex bg-gray-900 p-1.5 rounded-xl mt-4 md:mt-0 shadow-inner">
-            <FilterTab id="daily" label="Daily" icon={Clock} />
-            <FilterTab id="weekly" label="Weekly" icon={Calendar} />
-            <FilterTab id="all" label="All Time" icon={BarChart} />
-        </div>
-      </header>
+      {/* Background Ambience */}
+      <div className="fixed inset-0 pointer-events-none">
+        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-blue-600/10 rounded-full blur-[120px]"></div>
+        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-purple-600/10 rounded-full blur-[120px]"></div>
+      </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+      <div className="relative max-w-7xl mx-auto p-4 sm:p-6 lg:p-8">
 
-        {/* Sidebar: Manage Users */}
-        <div className="lg:col-span-1 space-y-4">
-            <div className="bg-gray-800 p-5 rounded-xl shadow-lg border border-gray-700">
-                <h2 className="text-xl font-bold text-white mb-4 flex items-center">
-                    <UserPlus className="h-5 w-5 mr-2 text-blue-400" />
-                    Add Contenders
-                </h2>
-                <form onSubmit={(e) => {
-                    e.preventDefault();
-                    const u = newUsername.trim();
-                    if(u && !friendUsernames.includes(u)) {
-                        saveFriendsList([...friendUsernames, u]);
-                        setNewUsername('');
-                    }
-                }} className="relative mb-4">
-                    <input
-                        type="text"
-                        value={newUsername}
-                        onChange={(e) => setNewUsername(e.target.value)}
-                        placeholder="Username..."
-                        className="w-full pl-4 pr-10 py-3 bg-gray-900 border border-gray-700 rounded-lg focus:outline-none focus:border-blue-500 text-sm"
-                    />
-                    <button type="submit" className="absolute right-2 top-2 p-1.5 bg-blue-600 rounded-md text-white hover:bg-blue-500 transition">
-                        <Send className="h-4 w-4" />
-                    </button>
-                </form>
-
-                <div className="space-y-2 max-h-[60vh] overflow-y-auto custom-scrollbar">
-                    {friendUsernames.map(u => <FriendListItem key={u} username={u} />)}
-                    {friendUsernames.length === 0 && <p className="text-xs text-gray-500 text-center py-4">No friends added yet.</p>}
+        {/* Header Section */}
+        <header className="flex flex-col md:flex-row justify-between items-end mb-12 gap-6">
+          <div className="relative">
+             <div className="flex items-center space-x-3 mb-2">
+                <div className="p-2 bg-gradient-to-br from-blue-600 to-indigo-600 rounded-lg shadow-lg shadow-blue-500/20">
+                    <Sword className="h-8 w-8 text-white transform -rotate-45" />
                 </div>
-            </div>
-        </div>
+                <h1 className="text-4xl sm:text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-white to-slate-400 tracking-tight">
+                    LEETCODE <span className="text-blue-500">BATTLE</span>
+                </h1>
+             </div>
+             <p className="text-slate-400 font-medium flex items-center gap-2">
+                <span className={`w-2 h-2 rounded-full ${loading ? 'bg-yellow-400 animate-pulse' : 'bg-emerald-400'}`}></span>
+                {appStatus}
+             </p>
+          </div>
 
-        {/* Main: Leaderboard */}
-        <div className="lg:col-span-3">
-            <div className="bg-gray-800/50 p-1 rounded-xl">
-                {loading ? (
-                    <div className="flex flex-col items-center justify-center h-64">
-                        <Loader2 className="animate-spin h-8 w-8 text-blue-500 mb-2" />
-                        <span className="text-gray-400 text-sm">Refreshing Stats...</span>
-                    </div>
-                ) : (
-                    <div className="space-y-1">
-                        {sortedLeaderboard.length > 0 ? (
-                            sortedLeaderboard.map((user, idx) => (
-                                <LeaderboardRow key={user.username} user={user} rank={idx + 1} />
-                            ))
-                        ) : (
-                            <div className="text-center py-12 bg-gray-800 rounded-xl border border-gray-700 border-dashed">
-                                <Trophy className="h-12 w-12 text-gray-600 mx-auto mb-3" />
-                                <p className="text-gray-400">Add users to generate the leaderboard.</p>
+          {/* Time Filter Tabs */}
+          <div className="bg-slate-900/50 backdrop-blur-md p-1.5 rounded-full border border-slate-700/50 flex shadow-xl">
+              <FilterTab id="daily" label="Daily" icon={Clock} />
+              <FilterTab id="weekly" label="Weekly" icon={Calendar} />
+              <FilterTab id="all" label="All Time" icon={BarChart} />
+          </div>
+        </header>
+
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+
+          {/* Sidebar: Squad Management */}
+          <div className="lg:col-span-4 space-y-6">
+              <div className="bg-slate-900/60 backdrop-blur-xl p-6 rounded-3xl border border-slate-700/50 shadow-2xl relative overflow-hidden group">
+                  <div className="absolute top-0 right-0 w-32 h-32 bg-blue-500/10 rounded-full blur-[50px] group-hover:bg-blue-500/20 transition-all"></div>
+
+                  <h2 className="text-xl font-bold text-white mb-6 flex items-center">
+                      <UserPlus className="h-5 w-5 mr-3 text-blue-400" />
+                      Manage Squad
+                  </h2>
+
+                  <form onSubmit={(e) => {
+                      e.preventDefault();
+                      const u = newUsername.trim();
+                      if(u && !friendUsernames.includes(u)) {
+                          saveFriendsList([...friendUsernames, u]);
+                          setNewUsername('');
+                      }
+                  }} className="relative mb-6">
+                      <Search className="absolute left-4 top-3.5 h-5 w-5 text-slate-500" />
+                      <input
+                          type="text"
+                          value={newUsername}
+                          onChange={(e) => setNewUsername(e.target.value)}
+                          placeholder="Enter username..."
+                          className="w-full pl-12 pr-12 py-3 bg-slate-950/50 border border-slate-700 rounded-xl focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 text-slate-200 placeholder-slate-600 transition-all"
+                      />
+                      <button
+                        type="submit"
+                        disabled={!newUsername.trim()}
+                        className="absolute right-2 top-2 p-1.5 bg-blue-600 rounded-lg text-white hover:bg-blue-500 disabled:opacity-50 disabled:hover:bg-blue-600 transition-colors"
+                      >
+                          <UserPlus className="h-4 w-4" />
+                      </button>
+                  </form>
+
+                  <div className="space-y-2 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
+                      <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 px-2">
+                        Tracking {friendUsernames.length} Fighters
+                      </div>
+                      {friendUsernames.length === 0 ? (
+                        <div className="text-center py-8 text-slate-500 border-2 border-dashed border-slate-800 rounded-xl">
+                            <Zap className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                            No opponents yet
+                        </div>
+                      ) : (
+                        friendUsernames.map(u => (
+                            <div key={u} className="flex justify-between items-center bg-slate-800/40 p-3 px-4 rounded-xl border border-slate-700/30 hover:border-slate-600 hover:bg-slate-800/80 transition-all group/item">
+                                <span className="font-medium text-slate-300">{u}</span>
+                                <button
+                                    onClick={() => saveFriendsList(friendUsernames.filter(n => n !== u))}
+                                    className="text-slate-500 hover:text-red-400 opacity-0 group-hover/item:opacity-100 transition-all"
+                                >
+                                    <Trash2 className="h-4 w-4" />
+                                </button>
                             </div>
-                        )}
-                    </div>
-                )}
-            </div>
+                        ))
+                      )}
+                  </div>
+              </div>
+          </div>
+
+          {/* Main: Leaderboard */}
+          <div className="lg:col-span-8">
+              {loading ? (
+                  <div className="flex flex-col items-center justify-center h-96 bg-slate-900/30 rounded-3xl border border-slate-800 border-dashed animate-pulse">
+                      <Loader2 className="animate-spin h-10 w-10 text-blue-500 mb-4" />
+                      <span className="text-slate-400 font-medium">Syncing Battle Data...</span>
+                  </div>
+              ) : (
+                  <div className="space-y-1">
+                      {sortedLeaderboard.length > 0 ? (
+                          sortedLeaderboard.map((user, idx) => (
+                              <LeaderboardRow key={user.username} user={user} rank={idx + 1} />
+                          ))
+                      ) : (
+                          <div className="flex flex-col items-center justify-center py-20 bg-slate-900/30 backdrop-blur-sm rounded-3xl border border-slate-800 border-dashed">
+                              <div className="p-4 bg-slate-800 rounded-full mb-4">
+                                <Trophy className="h-12 w-12 text-slate-600" />
+                              </div>
+                              <h3 className="text-xl font-bold text-slate-300 mb-1">Leaderboard Empty</h3>
+                              <p className="text-slate-500">Add usernames to start the simulation.</p>
+                          </div>
+                      )}
+                  </div>
+              )}
+          </div>
         </div>
       </div>
     </div>
