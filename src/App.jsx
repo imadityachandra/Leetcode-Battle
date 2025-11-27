@@ -73,8 +73,10 @@ const App = () => {
 
         // Add a timeout to warn if Auth takes too long
         const timeoutId = setTimeout(() => {
+             // FIX: Force exit the loading state if timeout fires to prevent user from being stuck
              if (!isAuthReady) {
-                 setError("Connection timed out. Please check your internet or Firebase Config.");
+                 setError("Connection timed out. Please check your internet or Firebase Config. The app will proceed with an empty leaderboard.");
+                 setIsAuthReady(true);
              }
         }, 10000);
 
@@ -94,6 +96,8 @@ const App = () => {
             console.error("Auth Failure:", err);
             // This ensures the error is visible on the black screen
             setError(`Authentication Failed: ${err.message}. (Did you enable Anonymous Auth in Firebase Console?)`);
+            // Ensure auth is ready even on failure to proceed to main screen
+            setIsAuthReady(true);
           }
         });
         return () => {
@@ -103,9 +107,11 @@ const App = () => {
       } catch (e) {
         console.error("Firebase Init Error:", e);
         setError("Database connection failed. Check your config keys.");
+        setIsAuthReady(true); // Ensure exit from loading state on init error
       }
     } else {
         setError("Firebase configuration is missing in the code.");
+        setIsAuthReady(true); // Ensure exit from loading state on config error
     }
   }, []);
 
