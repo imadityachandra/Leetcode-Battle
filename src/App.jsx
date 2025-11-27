@@ -38,7 +38,6 @@ const App = () => {
   const [db, setDb] = useState(null);
   const [auth, setAuth] = useState(null);
   const [currentUserId, setCurrentUserId] = useState(null);
-  const [isAuthReady, setIsAuthReady] = useState(false);
 
   // --- App State ---
   const [newUsername, setNewUsername] = useState('');
@@ -46,7 +45,7 @@ const App = () => {
   const [leaderboardData, setLeaderboardData] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [appStatus, setAppStatus] = useState("Ready to battle");
+  const [appStatus, setAppStatus] = useState("Connecting..."); // Initial status is connecting
 
   // Time Filter State
   const [timeFilter, setTimeFilter] = useState('all');
@@ -58,48 +57,44 @@ const App = () => {
         : `users/${currentUserId}/friends/list`)
     : null;
 
-  // 1. Initialize Firebase
+  // 1. Initialize Firebase (Non-blocking UI load)
   useEffect(() => {
+    let timeoutId;
+
     if (firebaseConfig && Object.keys(firebaseConfig).length > 0) {
       try {
-        // FIX 2: Check if app is already initialized.
-        // If length === 0, create it. If not, get the existing one.
         const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
-
         const firestore = getFirestore(app);
         const authentication = getAuth(app);
         setDb(firestore);
         setAuth(authentication);
+        setAppStatus("Authenticating...");
 
-        // Add a timeout to warn if Auth takes too long
-        const timeoutId = setTimeout(() => {
-             // FIX: Force exit the loading state if timeout fires to prevent user from being stuck
-             if (!isAuthReady) {
-                 setError("Connection timed out. Please check your internet or Firebase Config. The app will proceed with an empty leaderboard.");
-                 setIsAuthReady(true);
-             }
-        }, 10000);
+        // Use a shorter timeout to prompt error if auth is slow, but don't block.
+        timeoutId = setTimeout(() => {
+             setError(prev => prev || "Authentication is taking longer than expected. Proceeding with limited functionality.");
+             setAppStatus("Limited connection");
+        }, 5000); // 5 seconds
 
         const unsubscribe = onAuthStateChanged(authentication, async (user) => {
-          clearTimeout(timeoutId); // Clear timeout on response
+          clearTimeout(timeoutId);
           try {
             if (user) {
                 setCurrentUserId(user.uid);
             } else if (initialAuthToken) {
                 await signInWithCustomToken(authentication, initialAuthToken);
             } else {
-                // This is where it likely fails if Anonymous auth is off
                 await signInAnonymously(authentication);
             }
-            setIsAuthReady(true);
+            // Success
+            setAppStatus("Ready to battle");
           } catch (err) {
             console.error("Auth Failure:", err);
-            // This ensures the error is visible on the black screen
             setError(`Authentication Failed: ${err.message}. (Did you enable Anonymous Auth in Firebase Console?)`);
-            // Ensure auth is ready even on failure to proceed to main screen
-            setIsAuthReady(true);
+            setAppStatus("Auth Failed");
           }
         });
+
         return () => {
             unsubscribe();
             clearTimeout(timeoutId);
@@ -107,16 +102,21 @@ const App = () => {
       } catch (e) {
         console.error("Firebase Init Error:", e);
         setError("Database connection failed. Check your config keys.");
-        setIsAuthReady(true); // Ensure exit from loading state on init error
+        setAppStatus("Init Failed");
       }
     } else {
         setError("Firebase configuration is missing in the code.");
-        setIsAuthReady(true); // Ensure exit from loading state on config error
+        setAppStatus("Config Missing");
     }
+
+    return () => {
+        if (timeoutId) clearTimeout(timeoutId);
+    };
   }, []);
 
   // 2. Load Friends
   useEffect(() => {
+    // Only proceed if db and currentUserId are available
     if (!db || !currentUserId || !FRIENDS_DOC_PATH) return;
     const docRef = doc(db, FRIENDS_DOC_PATH);
     const unsubscribe = onSnapshot(docRef, (docSnap) => {
@@ -185,9 +185,10 @@ const App = () => {
 
   // 4. Fetch All User Data
   const fetchAllUsersData = useCallback(async () => {
-    if (friendUsernames.length === 0) {
+    // Only fetch if we have a user ID (meaning auth succeeded)
+    if (!currentUserId || friendUsernames.length === 0) {
       setLeaderboardData([]);
-      setAppStatus("Add usernames to start");
+      if (currentUserId) setAppStatus("Add usernames to start");
       return;
     }
 
@@ -233,11 +234,12 @@ const App = () => {
     setAppStatus(`Battle Updated`);
     if (results.some(r => r.error)) setError("Some users were unreachable.");
 
-  }, [friendUsernames, fetchWithRetry]);
+  }, [friendUsernames, fetchWithRetry, currentUserId]);
 
   useEffect(() => {
-    if (isAuthReady) fetchAllUsersData();
-  }, [friendUsernames, isAuthReady, fetchAllUsersData]);
+    // Run fetch data when friend list or user ID changes
+    if (db && currentUserId) fetchAllUsersData();
+  }, [friendUsernames, db, currentUserId, fetchAllUsersData]);
 
   const sortedLeaderboard = useMemo(() => {
     return [...leaderboardData].sort((a, b) => {
@@ -251,7 +253,8 @@ const App = () => {
   // --- Components ---
 
   const StatBadge = ({ label, count, colorClass }) => (
-    <div className={`flex items-center space-x-1 px-2 py-0.5 rounded-md ${colorClass} bg-opacity-10 border border-opacity-20 border-current`}>
+    // Increased opacity for better contrast on dark theme, now also good on light theme
+    <div className={`flex items-center space-x-1 px-2 py-0.5 rounded-md ${colorClass} bg-opacity-20 border border-opacity-50 border-current`}>
       <span className="text-[10px] font-bold uppercase tracking-wider opacity-80">{label}</span>
       <span className="text-xs font-bold">{count}</span>
     </div>
@@ -263,13 +266,13 @@ const App = () => {
       className={`relative flex items-center justify-center space-x-2 px-6 py-2.5 rounded-full font-semibold transition-all duration-300 ${
         timeFilter === id
         ? 'text-white shadow-[0_0_20px_rgba(59,130,246,0.5)] bg-gradient-to-r from-blue-600 to-indigo-600 scale-105'
-        : 'text-slate-400 hover:text-white hover:bg-white/5'
+        : 'text-gray-600 hover:text-gray-900 hover:bg-gray-200' // LIGHT THEME: Changed text and hover background
       }`}
     >
       <Icon className="h-4 w-4" />
       <span>{label}</span>
       {timeFilter === id && (
-        <span className="absolute -bottom-1 left-1/2 transform -translate-x-1/2 w-1/2 h-0.5 bg-blue-400 blur-[2px]"></span>
+        <span className="absolute -bottom-1 left-1/2 transform -translate-x-1/2 w-1/2 h-0.5 bg-blue-500 blur-[2px]"></span> // Adjusted blue-400 to blue-500
       )}
     </button>
   );
@@ -278,28 +281,32 @@ const App = () => {
     const count = user.counts[timeFilter];
 
     // Rank Styling
-    let rankStyles = "border-slate-700/50 bg-slate-800/40";
+    // LIGHT THEME: Changed default background and border colors
+    let rankStyles = "border-gray-300/50 bg-white/70";
     let textGlow = "";
     let medal = null;
 
     if (rank === 1) {
-      rankStyles = "border-yellow-500/50 bg-gradient-to-r from-yellow-500/10 to-transparent shadow-[0_0_30px_rgba(234,179,8,0.1)]";
+      rankStyles = "border-yellow-500/50 bg-gradient-to-r from-yellow-500/10 to-white shadow-[0_0_30px_rgba(234,179,8,0.1)]";
       textGlow = "drop-shadow-[0_0_10px_rgba(234,179,8,0.5)]";
       medal = <Crown className="h-6 w-6 text-yellow-400 fill-yellow-400 animate-pulse" />;
     } else if (rank === 2) {
-      rankStyles = "border-slate-300/50 bg-gradient-to-r from-slate-300/10 to-transparent";
-      medal = <Trophy className="h-5 w-5 text-slate-300" />;
+      // Used brighter blue gradient and border for better contrast
+      rankStyles = "border-blue-400/50 bg-gradient-to-r from-blue-400/10 to-white";
+      medal = <Trophy className="h-5 w-5 text-blue-500" />;
     } else if (rank === 3) {
-      rankStyles = "border-amber-700/50 bg-gradient-to-r from-amber-700/10 to-transparent";
-      medal = <Trophy className="h-5 w-5 text-amber-700" />;
+      // Used emerald gradient and border for better contrast
+      rankStyles = "border-emerald-400/50 bg-gradient-to-r from-emerald-400/10 to-white";
+      medal = <Trophy className="h-5 w-5 text-emerald-500" />;
     }
 
     return (
-      <div className={`group relative flex items-center p-4 rounded-2xl border backdrop-blur-md transition-all duration-300 hover:scale-[1.01] hover:bg-slate-800/60 ${rankStyles} mb-4`}>
+      <div className={`group relative flex items-center p-4 rounded-2xl border backdrop-blur-md transition-all duration-300 hover:scale-[1.01] hover:bg-gray-200/80 ${rankStyles} mb-4`}>
         {/* Rank Number */}
         <div className="w-12 flex flex-col items-center justify-center mr-4 flex-shrink-0">
           {medal}
-          <span className={`text-2xl font-black ${rank === 1 ? 'text-yellow-400' : 'text-slate-500'} ${textGlow}`}>
+          {/* LIGHT THEME: Changed text-slate-500 to text-gray-500 */}
+          <span className={`text-2xl font-black ${rank === 1 ? 'text-yellow-600' : 'text-gray-500'} ${textGlow}`}>
             #{rank}
           </span>
         </div>
@@ -308,33 +315,37 @@ const App = () => {
         <div className="flex items-center flex-grow min-w-0">
           <div className="relative">
             <img
-              src={user.avatar || `https://placehold.co/100x100/1e293b/ffffff?text=${user.username.charAt(0)}`}
+              // LIGHT THEME: Changed placeholder background to a brighter one
+              src={user.avatar || `https://placehold.co/100x100/e0e0e0/000000?text=${user.username.charAt(0)}`}
               alt="avatar"
-              className={`w-14 h-14 rounded-full object-cover border-2 shadow-lg ${rank === 1 ? 'border-yellow-500' : 'border-slate-600'}`}
+              className={`w-14 h-14 rounded-full object-cover border-2 shadow-lg ${rank === 1 ? 'border-yellow-500' : 'border-gray-300'}`}
             />
             {rank === 1 && <div className="absolute inset-0 rounded-full shadow-[0_0_20px_rgba(234,179,8,0.4)]"></div>}
           </div>
 
           <div className="ml-4 min-w-0">
-            <h3 className={`text-lg font-bold text-white truncate group-hover:text-blue-400 transition-colors ${rank === 1 ? 'text-xl' : ''}`}>
+            {/* LIGHT THEME: Changed text-white to text-gray-900 */}
+            <h3 className={`text-lg font-bold text-gray-900 truncate group-hover:text-blue-600 transition-colors ${rank === 1 ? 'text-xl' : ''}`}>
                 {user.username}
             </h3>
             <div className="flex space-x-2 mt-1.5">
-                <StatBadge label="Easy" count={user.stats.easy} colorClass="text-emerald-400 bg-emerald-400 border-emerald-500" />
-                <StatBadge label="Med" count={user.stats.medium} colorClass="text-amber-400 bg-amber-400 border-amber-500" />
-                <StatBadge label="Hard" count={user.stats.hard} colorClass="text-rose-400 bg-rose-400 border-rose-500" />
+                <StatBadge label="Easy" count={user.stats.easy} colorClass="text-emerald-600 bg-emerald-600 border-emerald-500" />
+                <StatBadge label="Med" count={user.stats.medium} colorClass="text-amber-600 bg-amber-600 border-amber-500" />
+                <StatBadge label="Hard" count={user.stats.hard} colorClass="text-rose-600 bg-rose-600 border-rose-500" />
             </div>
           </div>
         </div>
 
         {/* Score Metric */}
-        <div className="text-right flex-shrink-0 ml-4 pl-4 border-l border-slate-700/50">
-          <p className="text-[10px] uppercase tracking-widest text-slate-400 font-semibold mb-1">
+        {/* LIGHT THEME: Changed border color */}
+        <div className="text-right flex-shrink-0 ml-4 pl-4 border-l border-gray-300/50">
+          {/* LIGHT THEME: Changed text-slate-400 to text-gray-500 */}
+          <p className="text-[10px] uppercase tracking-widest text-gray-500 font-semibold mb-1">
             {timeFilter === 'all' ? 'Total Solved' : 'Solved'}
           </p>
           <p className={`text-4xl font-black tabular-nums tracking-tight ${
-              timeFilter === 'daily' ? 'text-emerald-400' :
-              timeFilter === 'weekly' ? 'text-blue-400' : 'text-purple-400'
+              timeFilter === 'daily' ? 'text-emerald-600' :
+              timeFilter === 'weekly' ? 'text-blue-600' : 'text-purple-600'
           } ${rank === 1 ? 'drop-shadow-[0_0_10px_rgba(168,85,247,0.5)]' : ''}`}>
             {count}
           </p>
@@ -343,75 +354,66 @@ const App = () => {
     );
   };
 
-  // Loading View
-  if (!isAuthReady) {
-    return (
-        <div className="min-h-screen bg-[#0B0F19] flex flex-col items-center justify-center relative overflow-hidden p-6 text-center">
-             {/* Background Glows */}
-             <div className="absolute top-0 left-0 w-96 h-96 bg-blue-500/20 rounded-full blur-[100px]"></div>
-             <div className="absolute bottom-0 right-0 w-96 h-96 bg-purple-500/20 rounded-full blur-[100px]"></div>
-
-            <Loader2 className="animate-spin h-12 w-12 text-blue-500 mb-6 relative z-10" />
-            <h2 className="text-2xl font-bold text-white tracking-widest uppercase relative z-10 mb-2">Initializing Battle...</h2>
-
-            {error && (
-              <div className="mt-8 relative z-20 bg-red-900/40 border border-red-500/50 p-6 rounded-xl max-w-lg backdrop-blur-md shadow-2xl">
-                 <div className="flex items-center justify-center space-x-2 mb-2 text-red-400">
-                    <AlertTriangle className="h-6 w-6" />
-                    <h3 className="text-lg font-bold">Connection Error</h3>
-                 </div>
-                 <p className="text-slate-200">{error}</p>
-              </div>
-            )}
-        </div>
-    );
-  }
-
   return (
-    <div className="min-h-screen bg-[#0B0F19] text-slate-200 font-sans selection:bg-blue-500 selection:text-white relative overflow-x-hidden">
+    // LIGHT THEME: Changed main background and text colors
+    <div className="min-h-screen bg-gray-100 text-gray-900 font-sans selection:bg-blue-500 selection:text-white relative overflow-x-hidden">
 
-      {/* Background Ambience */}
+      {/* Background Ambience (Reduced intensity for light theme) */}
       <div className="fixed inset-0 pointer-events-none">
-        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-blue-600/10 rounded-full blur-[120px]"></div>
-        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-purple-600/10 rounded-full blur-[120px]"></div>
+        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-blue-500/10 rounded-full blur-[100px]"></div>
+        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-purple-500/10 rounded-full blur-[100px]"></div>
       </div>
 
       <div className="relative max-w-7xl mx-auto p-4 sm:p-6 lg:p-8">
 
         {/* Header Section */}
-        <header className="flex flex-col md:flex-row justify-between items-end mb-12 gap-6">
+        <header className="flex flex-col md:flex-row justify-between items-end mb-8 gap-4">
           <div className="relative">
              <div className="flex items-center space-x-3 mb-2">
                 <div className="p-2 bg-gradient-to-br from-blue-600 to-indigo-600 rounded-lg shadow-lg shadow-blue-500/20">
                     <Sword className="h-8 w-8 text-white transform -rotate-45" />
                 </div>
-                <h1 className="text-4xl sm:text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-white to-slate-400 tracking-tight">
-                    LEETCODE <span className="text-blue-500">BATTLE</span>
+                {/* LIGHT THEME: Changed gradient text to dark gray */}
+                <h1 className="text-4xl sm:text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-gray-900 to-gray-600 tracking-tight">
+                    LEETCODE <span className="text-blue-600">BATTLE</span>
                 </h1>
              </div>
-             <p className="text-slate-400 font-medium flex items-center gap-2">
-                <span className={`w-2 h-2 rounded-full ${loading ? 'bg-yellow-400 animate-pulse' : 'bg-emerald-400'}`}></span>
+             {/* LIGHT THEME: Changed text-slate-400 to text-gray-600 */}
+             <p className="text-gray-600 font-medium flex items-center gap-2">
+                <span className={`w-2 h-2 rounded-full ${loading || appStatus.includes("Connect") || appStatus.includes("Auth") ? 'bg-yellow-500 animate-pulse' : 'bg-emerald-500'}`}></span>
                 {appStatus}
              </p>
           </div>
 
           {/* Time Filter Tabs */}
-          <div className="bg-slate-900/50 backdrop-blur-md p-1.5 rounded-full border border-slate-700/50 flex shadow-xl">
+          {/* LIGHT THEME: Changed dark background and border */}
+          <div className="bg-gray-200/80 backdrop-blur-md p-1.5 rounded-full border border-gray-300/80 flex shadow-lg">
               <FilterTab id="daily" label="Daily" icon={Clock} />
               <FilterTab id="weekly" label="Weekly" icon={Calendar} />
               <FilterTab id="all" label="All Time" icon={BarChart} />
           </div>
         </header>
 
+        {error && (
+            <div className="mb-8 relative z-20 bg-red-500/10 border border-red-500/50 p-4 rounded-xl max-w-full backdrop-blur-md shadow-xl">
+                <div className="flex items-center space-x-2 text-red-600">
+                   <AlertTriangle className="h-5 w-5 flex-shrink-0" />
+                   <p className="text-sm font-medium">{error}</p>
+                </div>
+            </div>
+        )}
+
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
 
           {/* Sidebar: Squad Management */}
           <div className="lg:col-span-4 space-y-6">
-              <div className="bg-slate-900/60 backdrop-blur-xl p-6 rounded-3xl border border-slate-700/50 shadow-2xl relative overflow-hidden group">
+              {/* LIGHT THEME: Changed background and border */}
+              <div className="bg-white/80 backdrop-blur-xl p-6 rounded-3xl border border-gray-300/80 shadow-2xl relative overflow-hidden group">
                   <div className="absolute top-0 right-0 w-32 h-32 bg-blue-500/10 rounded-full blur-[50px] group-hover:bg-blue-500/20 transition-all"></div>
 
-                  <h2 className="text-xl font-bold text-white mb-6 flex items-center">
-                      <UserPlus className="h-5 w-5 mr-3 text-blue-400" />
+                  {/* LIGHT THEME: Changed text to dark */}
+                  <h2 className="text-xl font-bold text-gray-900 mb-6 flex items-center">
+                      <UserPlus className="h-5 w-5 mr-3 text-blue-600" />
                       Manage Squad
                   </h2>
 
@@ -423,13 +425,15 @@ const App = () => {
                           setNewUsername('');
                       }
                   }} className="relative mb-6">
-                      <Search className="absolute left-4 top-3.5 h-5 w-5 text-slate-500" />
+                      {/* LIGHT THEME: Changed icon color */}
+                      <Search className="absolute left-4 top-3.5 h-5 w-5 text-gray-500" />
                       <input
                           type="text"
                           value={newUsername}
                           onChange={(e) => setNewUsername(e.target.value)}
                           placeholder="Enter username..."
-                          className="w-full pl-12 pr-12 py-3 bg-slate-950/50 border border-slate-700 rounded-xl focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 text-slate-200 placeholder-slate-600 transition-all"
+                          // LIGHT THEME: Changed background, border, text, and placeholder colors
+                          className="w-full pl-12 pr-12 py-3 bg-white/70 border border-gray-400 rounded-xl focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 text-gray-800 placeholder-gray-500 transition-all"
                       />
                       <button
                         type="submit"
@@ -441,21 +445,25 @@ const App = () => {
                   </form>
 
                   <div className="space-y-2 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
-                      <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 px-2">
+                      {/* LIGHT THEME: Changed text color */}
+                      <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2 px-2">
                         Tracking {friendUsernames.length} Fighters
                       </div>
                       {friendUsernames.length === 0 ? (
-                        <div className="text-center py-8 text-slate-500 border-2 border-dashed border-slate-800 rounded-xl">
+                        // LIGHT THEME: Changed border and text colors
+                        <div className="text-center py-8 text-gray-500 border-2 border-dashed border-gray-300 rounded-xl">
                             <Zap className="h-8 w-8 mx-auto mb-2 opacity-50" />
                             No opponents yet
                         </div>
                       ) : (
                         friendUsernames.map(u => (
-                            <div key={u} className="flex justify-between items-center bg-slate-800/40 p-3 px-4 rounded-xl border border-slate-700/30 hover:border-slate-600 hover:bg-slate-800/80 transition-all group/item">
-                                <span className="font-medium text-slate-300">{u}</span>
+                            // LIGHT THEME: Changed background, border, text, and hover classes
+                            <div key={u} className="flex justify-between items-center bg-gray-200/80 p-3 px-4 rounded-xl border border-gray-300/50 hover:border-gray-400 hover:bg-gray-200/90 transition-all group/item">
+                                <span className="font-medium text-gray-700">{u}</span>
+                                {/* LIGHT THEME: Changed icon color */}
                                 <button
                                     onClick={() => saveFriendsList(friendUsernames.filter(n => n !== u))}
-                                    className="text-slate-500 hover:text-red-400 opacity-0 group-hover/item:opacity-100 transition-all"
+                                    className="text-gray-500 hover:text-red-600 opacity-0 group-hover/item:opacity-100 transition-all"
                                 >
                                     <Trash2 className="h-4 w-4" />
                                 </button>
@@ -469,9 +477,10 @@ const App = () => {
           {/* Main: Leaderboard */}
           <div className="lg:col-span-8">
               {loading ? (
-                  <div className="flex flex-col items-center justify-center h-96 bg-slate-900/30 rounded-3xl border border-slate-800 border-dashed animate-pulse">
+                  // LIGHT THEME: Changed background and border colors
+                  <div className="flex flex-col items-center justify-center h-96 bg-white/60 rounded-3xl border border-gray-300 border-dashed animate-pulse">
                       <Loader2 className="animate-spin h-10 w-10 text-blue-500 mb-4" />
-                      <span className="text-slate-400 font-medium">Syncing Battle Data...</span>
+                      <span className="text-gray-600 font-medium">Syncing Battle Data...</span>
                   </div>
               ) : (
                   <div className="space-y-1">
@@ -480,12 +489,13 @@ const App = () => {
                               <LeaderboardRow key={user.username} user={user} rank={idx + 1} />
                           ))
                       ) : (
-                          <div className="flex flex-col items-center justify-center py-20 bg-slate-900/30 backdrop-blur-sm rounded-3xl border border-slate-800 border-dashed">
-                              <div className="p-4 bg-slate-800 rounded-full mb-4">
-                                <Trophy className="h-12 w-12 text-slate-600" />
+                          // LIGHT THEME: Changed background and border colors
+                          <div className="flex flex-col items-center justify-center py-20 bg-white/60 backdrop-blur-sm rounded-3xl border border-gray-300 border-dashed">
+                              <div className="p-4 bg-gray-200 rounded-full mb-4">
+                                <Trophy className="h-12 w-12 text-gray-400" />
                               </div>
-                              <h3 className="text-xl font-bold text-slate-300 mb-1">Leaderboard Empty</h3>
-                              <p className="text-slate-500">Add usernames to start the simulation.</p>
+                              <h3 className="text-xl font-bold text-gray-700 mb-1">Leaderboard Empty</h3>
+                              <p className="text-gray-500">Add usernames to start the simulation.</p>
                           </div>
                       )}
                   </div>
