@@ -114,8 +114,9 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState(null);
   
   // War state
-  const [warState, setWarState] = useState(null); // { active: bool, problemLink: string, startTime: number, duration: number, winner: string }
+  const [warState, setWarState] = useState(null); // { active: bool, problemLink: string, problemSlug: string, startTime: number, duration: number, winner: string, submissions: {} }
   const [warTimer, setWarTimer] = useState(0); // seconds remaining
+  const [warSubmissions, setWarSubmissions] = useState({}); // { username: { status: string, time: number } }
 
   // Firestore doc paths
   // Shared room path - all users access the same room data
@@ -264,11 +265,16 @@ export default function App() {
         const data = snap.data();
         // Update friends list from shared room
       setFriendUsernames(data?.usernames || []);
-        // Update war state
+        // Update war state (room-specific)
         if (data?.war) {
           setWarState(data.war);
+          // Update submissions if available
+          if (data.war.submissions) {
+            setWarSubmissions(data.war.submissions);
+          }
         } else {
           setWarState(null);
+          setWarSubmissions({});
         }
         // Update local rooms state with shared room data
         setRooms(prev => {
@@ -691,10 +697,16 @@ export default function App() {
         "plus-one"
       ];
       const randomProblem = problems[Math.floor(Math.random() * problems.length)];
-      return `https://leetcode.com/problems/${randomProblem}/`;
+      return {
+        link: `https://leetcode.com/problems/${randomProblem}/`,
+        slug: randomProblem
+      };
     } catch (e) {
       console.error("Error getting random problem:", e);
-      return "https://leetcode.com/problemset/all/";
+      return {
+        link: "https://leetcode.com/problemset/all/",
+        slug: ""
+      };
     }
   };
 
@@ -706,29 +718,46 @@ export default function App() {
       return;
     }
     
-    const problemLink = await getRandomProblem();
+    const problem = await getRandomProblem();
     const warDuration = 3600; // 1 hour in seconds
     const startTime = Date.now();
     
     const newWarState = {
       active: true,
-      problemLink,
+      problemLink: problem.link,
+      problemSlug: problem.slug,
       startTime,
       duration: warDuration,
       winner: null,
-      participants: friendUsernames
+      participants: friendUsernames,
+      submissions: {}
     };
     
-    // Save to shared room
+    // Save to shared room (room-specific)
     await saveSharedRoom({ war: newWarState });
     setWarState(newWarState);
     setWarTimer(warDuration);
+    setWarSubmissions({});
     playBeep();
   };
 
-  // Check for winner by polling submissions
+  // Stop war
+  const stopWar = async () => {
+    if (!warState || !warState.active) return;
+    
+    const updatedWar = {
+      ...warState,
+      active: false
+    };
+    
+    await saveSharedRoom({ war: updatedWar });
+    setWarState(updatedWar);
+    playBeep();
+  };
+
+  // Check for winner by polling submissions for the specific problem
   useEffect(() => {
-    if (!warState || !warState.active || warState.winner) return;
+    if (!warState || !warState.active || warState.winner || !warState.problemSlug) return;
     
     const checkInterval = setInterval(async () => {
       if (!warState || !warState.active || warState.winner) {
@@ -736,17 +765,43 @@ export default function App() {
       }
       
       try {
-        // Check each participant's recent submissions
+        const updatedSubmissions = { ...warSubmissions };
+        let winner = null;
+        
+        // Check each participant's recent submissions for the specific problem
         const checks = warState.participants.map(async (username) => {
           try {
-            const submission = await fetchWithRetry(`${API_BASE_URL}/${username}/submission?limit=10`);
+            const submission = await fetchWithRetry(`${API_BASE_URL}/${username}/submission?limit=50`);
             if (submission && Array.isArray(submission) && submission.length > 0) {
-              // Find first accepted submission after war start time
+              // Find submissions for this specific problem after war start time
               for (const sub of submission) {
-                if (sub.statusDisplay === "Accepted") {
-                  const submissionTime = parseInt(sub.timestamp || "0", 10) * 1000;
-                  if (submissionTime >= warState.startTime) {
-                    return username;
+                const submissionTime = parseInt(sub.timestamp || "0", 10) * 1000;
+                if (submissionTime >= warState.startTime) {
+                  // Check if this submission is for our problem
+                  // Try multiple ways to match the problem
+                  const problemTitle = (sub.title || "").toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+                  const problemSlug = warState.problemSlug.toLowerCase();
+                  const titleSlug = (sub.titleSlug || "").toLowerCase();
+                  
+                  // Match by slug, title slug, or title contains slug
+                  if (titleSlug === problemSlug || 
+                      problemTitle.includes(problemSlug) || 
+                      problemSlug.includes(problemTitle) ||
+                      (sub.title && sub.title.toLowerCase().includes(problemSlug.replace(/-/g, " ")))) {
+                    // Update submission status (keep the earliest one)
+                    if (!updatedSubmissions[username] || submissionTime < updatedSubmissions[username].time) {
+                      updatedSubmissions[username] = {
+                        status: sub.statusDisplay || sub.status || "Unknown",
+                        time: submissionTime,
+                        runtime: sub.runtime || "N/A",
+                        memory: sub.memory || "N/A"
+                      };
+                      
+                      // Check if this is the first accepted submission
+                      if ((sub.statusDisplay === "Accepted" || sub.status === "Accepted") && !winner) {
+                        winner = username;
+                      }
+                    }
                   }
                 }
               }
@@ -757,17 +812,25 @@ export default function App() {
           return null;
         });
         
-        const results = await Promise.all(checks);
-        const winner = results.find(r => r !== null);
+        await Promise.all(checks);
         
-        if (winner) {
-          // Update war state with winner
-          const updatedWar = { ...warState, active: false, winner };
-          await saveSharedRoom({ war: updatedWar });
-          setWarState(updatedWar);
-          clearInterval(checkInterval);
-          playBeep();
-          burstMicro(document.getElementById("burst-root"), 20);
+        // Update submissions state
+        if (Object.keys(updatedSubmissions).length > 0) {
+          setWarSubmissions(updatedSubmissions);
+          const updatedWar = { ...warState, submissions: updatedSubmissions };
+          if (winner) {
+            updatedWar.active = false;
+            updatedWar.winner = winner;
+            await saveSharedRoom({ war: updatedWar });
+            setWarState(updatedWar);
+            clearInterval(checkInterval);
+            playBeep();
+            burstMicro(document.getElementById("burst-root"), 20);
+          } else {
+            // Update submissions without ending war
+            await saveSharedRoom({ war: updatedWar });
+            setWarState(updatedWar);
+          }
         }
       } catch (e) {
         console.error("Error checking for winner:", e);
@@ -775,7 +838,7 @@ export default function App() {
     }, 10000); // Check every 10 seconds
     
     return () => clearInterval(checkInterval);
-  }, [warState?.active, warState?.startTime, warState?.participants, saveSharedRoom, fetchWithRetry]);
+  }, [warState?.active, warState?.startTime, warState?.participants, warState?.problemSlug, warState?.winner, saveSharedRoom, fetchWithRetry, warSubmissions]);
 
   // Timer effect
   useEffect(() => {
@@ -1104,7 +1167,18 @@ export default function App() {
         .start-war-btn:hover { transform: translateY(-2px); }
         .start-war-btn:active { transform: translateY(0); }
         [data-theme="neon"] .start-war-btn { background:linear-gradient(90deg,#8b5cf6,#7c3aed); box-shadow: 0 8px 20px rgba(139,92,246,0.4); }
+        .stop-war-btn { padding:8px 16px; border-radius:8px; border:1px solid var(--border); background:var(--card); color:var(--text); font-weight:700; font-size:14px; cursor:pointer; display:inline-flex; align-items:center; gap:6px; margin-top:12px; transition: all 0.2s ease; }
+        .stop-war-btn:hover { background:var(--border); }
         .war-status { font-size:14px; color:var(--muted); margin-top:8px; }
+        .war-submissions { margin-top:16px; display:flex; flex-direction:column; gap:8px; }
+        .war-submission-item { display:flex; justify-content:space-between; align-items:center; padding:10px; background:var(--card); border:1px solid var(--border); border-radius:8px; }
+        .war-submission-user { font-weight:700; }
+        .war-submission-status { padding:4px 10px; border-radius:6px; font-size:12px; font-weight:700; }
+        .war-submission-status.accepted { background:#d1fae5; color:#065f46; }
+        .war-submission-status.wrong { background:#fee2e2; color:#991b1b; }
+        .war-submission-status.tle { background:#fef3c7; color:#92400e; }
+        .war-submission-status.runtime { background:#dbeafe; color:#1e40af; }
+        .war-submission-status.other { background:#f3f4f6; color:#374151; }
 
         /* error toast */
         .toast { position:fixed; right:20px; bottom:20px; background: var(--card); color:#b91c1c; border:1px solid #fee2e2; padding:10px 14px; border-radius:12px; box-shadow: 0 8px 30px rgba(17,24,39,0.06); transition: background-color 0.3s ease; }
@@ -1359,11 +1433,15 @@ export default function App() {
             {/* War Card */}
             {warState && warState.active ? (
               <div className="war-card active">
-                <div className="war-header">
+                <div className="war-header" style={{ justifyContent: "space-between" }}>
                   <div className="war-title">
                     <Sword className="icon" style={{ width: 24, height: 24 }} />
                     War Active!
                   </div>
+                  <button className="stop-war-btn" onClick={stopWar}>
+                    <X className="icon" style={{ width: 14, height: 14 }} />
+                    Stop
+                  </button>
                 </div>
                 <div className="war-timer">
                   {Math.floor(warTimer / 60)}:{(warTimer % 60).toString().padStart(2, '0')}
@@ -1373,9 +1451,33 @@ export default function App() {
                   <Target className="icon" style={{ width: 18, height: 18 }} />
                   Solve Problem
                 </a>
-                <div className="war-status" style={{ marginTop: 12 }}>
-                  Participants: {warState.participants?.join(", ") || "None"}
-                </div>
+                
+                {/* Submission Status */}
+                {warState.participants && warState.participants.length > 0 && (
+                  <div className="war-submissions">
+                    <div className="war-status" style={{ marginTop: 16, marginBottom: 8, fontWeight: 700 }}>Submission Status:</div>
+                    {warState.participants.map(username => {
+                      const submission = warSubmissions[username] || warState.submissions?.[username];
+                      const getStatusClass = (status) => {
+                        if (!status) return "other";
+                        const s = status.toLowerCase();
+                        if (s.includes("accepted")) return "accepted";
+                        if (s.includes("wrong") || s.includes("error")) return "wrong";
+                        if (s.includes("time limit") || s.includes("tle")) return "tle";
+                        if (s.includes("runtime")) return "runtime";
+                        return "other";
+                      };
+                      return (
+                        <div key={username} className="war-submission-item">
+                          <div className="war-submission-user">{username}</div>
+                          <div className={`war-submission-status ${getStatusClass(submission?.status)}`}>
+                            {submission?.status || "Not submitted"}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             ) : warState && warState.winner ? (
               <div className="war-card">
