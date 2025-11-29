@@ -29,7 +29,7 @@ import {
 // Firebase (avoid duplicate init)
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "firebase/auth";
-import { getFirestore, doc, setDoc, onSnapshot } from "firebase/firestore";
+import { getFirestore, doc, setDoc, onSnapshot, getDoc } from "firebase/firestore";
 
 /**
  * ========== CONFIGURATION ==========
@@ -109,11 +109,19 @@ export default function App() {
   const [linkCopied, setLinkCopied] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
 
-  // Firestore doc path (includes roomId)
-  const FRIENDS_DOC_PATH = currentUserId
+  // Firestore doc paths
+  // Shared room path - all users access the same room data
+  const SHARED_ROOM_PATH = currentRoomId
     ? (typeof __app_id !== "undefined"
-        ? `/artifacts/${appId}/users/${currentUserId}/rooms/${currentRoomId}/friends/list`
-        : `users/${currentUserId}/rooms/${currentRoomId}/friends/list`)
+        ? `/artifacts/${appId}/rooms/${currentRoomId}`
+        : `rooms/${currentRoomId}`)
+    : null;
+  
+  // User's local rooms list (for UI)
+  const USER_ROOMS_PATH = currentUserId
+    ? (typeof __app_id !== "undefined"
+        ? `/artifacts/${appId}/users/${currentUserId}/rooms/list`
+        : `users/${currentUserId}/rooms/list`)
     : null;
 
   /* ---------------------------
@@ -171,31 +179,56 @@ export default function App() {
     localStorage.setItem("lb_currentRoom", currentRoomId);
   }, [currentRoomId]);
 
-  // Save rooms to Firebase
-  const saveRooms = useCallback(async (roomsData) => {
-    if (!db || !currentUserId) {
+  // Save user's local rooms list to Firebase (for UI)
+  const saveUserRooms = useCallback(async (roomsData) => {
+    if (!db || !currentUserId || !USER_ROOMS_PATH) {
       setRooms(roomsData);
       return;
     }
     try {
-      const roomsPath = typeof __app_id !== "undefined"
-        ? `/artifacts/${appId}/users/${currentUserId}/rooms/list`
-        : `users/${currentUserId}/rooms/list`;
-      await setDoc(doc(db, roomsPath), { rooms: roomsData });
+      await setDoc(doc(db, USER_ROOMS_PATH), { rooms: roomsData });
       setRooms(roomsData);
     } catch (e) {
-      console.error("saveRooms error:", e);
+      console.error("saveUserRooms error:", e);
       setRooms(roomsData); // Fallback to local state
     }
-  }, [db, currentUserId]);
+  }, [db, currentUserId, USER_ROOMS_PATH]);
 
-  // Load rooms from Firebase
+  // Save shared room data to Firebase
+  const saveSharedRoom = useCallback(async (roomData) => {
+    if (!db || !SHARED_ROOM_PATH) {
+      return;
+    }
+    try {
+      await setDoc(doc(db, SHARED_ROOM_PATH), roomData, { merge: true });
+    } catch (e) {
+      console.error("saveSharedRoom error:", e);
+      setError("Failed to save room data.");
+    }
+  }, [db, SHARED_ROOM_PATH]);
+
+  // Fetch shared room from Firebase
+  const fetchSharedRoom = useCallback(async (roomId) => {
+    if (!db) return null;
+    try {
+      const roomPath = typeof __app_id !== "undefined"
+        ? `/artifacts/${appId}/rooms/${roomId}`
+        : `rooms/${roomId}`;
+      const roomDoc = await getDoc(doc(db, roomPath));
+      if (roomDoc.exists()) {
+        return { id: roomId, ...roomDoc.data() };
+      }
+      return null;
+    } catch (e) {
+      console.error("fetchSharedRoom error:", e);
+      return null;
+    }
+  }, [db]);
+
+  // Load user's local rooms list from Firebase (for UI)
   useEffect(() => {
-    if (!db || !currentUserId) return;
-    const roomsPath = typeof __app_id !== "undefined"
-      ? `/artifacts/${appId}/users/${currentUserId}/rooms/list`
-      : `users/${currentUserId}/rooms/list`;
-    const docRef = doc(db, roomsPath);
+    if (!db || !currentUserId || !USER_ROOMS_PATH) return;
+    const docRef = doc(db, USER_ROOMS_PATH);
     const unsub = onSnapshot(docRef, (snap) => {
       if (snap.exists()) {
         const data = snap.data();
@@ -212,7 +245,37 @@ export default function App() {
       console.error("Firestore rooms snapshot error", err);
     });
     return () => unsub();
-  }, [db, currentUserId, currentRoomId]);
+  }, [db, currentUserId, currentRoomId, USER_ROOMS_PATH]);
+
+  // Load shared room data from Firebase (room-specific data)
+  useEffect(() => {
+    if (!db || !SHARED_ROOM_PATH) return;
+    const docRef = doc(db, SHARED_ROOM_PATH);
+    const unsub = onSnapshot(docRef, (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        // Update friends list from shared room
+        setFriendUsernames(data?.usernames || []);
+        // Update local rooms state with shared room data
+        setRooms(prev => {
+          const roomIndex = prev.findIndex(r => r.id === currentRoomId);
+          if (roomIndex >= 0) {
+            const updated = [...prev];
+            updated[roomIndex] = {
+              ...updated[roomIndex],
+              name: data.name || updated[roomIndex].name,
+              usernames: data.usernames || []
+            };
+            return updated;
+          }
+          return prev;
+        });
+      }
+    }, (err) => {
+      console.error("Firestore shared room snapshot error", err);
+    });
+    return () => unsub();
+  }, [db, SHARED_ROOM_PATH, currentRoomId]);
 
   // Get current room usernames
   const currentRoomUsernames = useMemo(() => {
@@ -220,58 +283,26 @@ export default function App() {
     return currentRoom?.usernames || [];
   }, [rooms, currentRoomId]);
 
-  /* ---------------------------
-     Load and save friends list (room-specific)
-     --------------------------- */
-  useEffect(() => {
-    // Load from local rooms state first when switching rooms
-    setFriendUsernames(currentRoomUsernames);
-
-    // Then sync with Firebase
-    if (!db || !currentUserId || !FRIENDS_DOC_PATH) return;
-    const docRef = doc(db, FRIENDS_DOC_PATH);
-    const unsub = onSnapshot(docRef, (snap) => {
-      if (!snap.exists()) {
-        setFriendUsernames(currentRoomUsernames);
-        return;
-      }
-      const data = snap.data();
-      const usernames = data?.usernames || [];
-      setFriendUsernames(usernames);
-      // Update local rooms state only if different
-      setRooms(prev => {
-        const currentRoom = prev.find(r => r.id === currentRoomId);
-        if (currentRoom && JSON.stringify(currentRoom.usernames) !== JSON.stringify(usernames)) {
-          return prev.map(r => 
-            r.id === currentRoomId ? { ...r, usernames } : r
-          );
-        }
-        return prev;
-      });
-    }, (err) => {
-      console.error("Firestore snapshot error", err);
-    });
-    return () => unsub();
-  }, [db, currentUserId, FRIENDS_DOC_PATH, currentRoomId, currentRoomUsernames]);
+  // Friends list is now loaded from shared room (see shared room snapshot above)
 
   const saveFriendsList = useCallback(async (usernames) => {
-    // Update local rooms state
+    // Update local state immediately
+    setFriendUsernames(usernames);
     setRooms(prev => prev.map(r => 
       r.id === currentRoomId ? { ...r, usernames } : r
     ));
 
-    if (!db || !currentUserId || !FRIENDS_DOC_PATH) {
-      setFriendUsernames(usernames);
+    // Save to shared room in Firebase
+    if (!db || !SHARED_ROOM_PATH) {
       return;
     }
     try {
-      await setDoc(doc(db, FRIENDS_DOC_PATH), { usernames });
-      setFriendUsernames(usernames);
+      await saveSharedRoom({ usernames });
     } catch (e) {
       console.error("saveFriendsList error:", e);
       setError("Failed to save friend list.");
     }
-  }, [db, currentUserId, FRIENDS_DOC_PATH, currentRoomId]);
+  }, [db, SHARED_ROOM_PATH, currentRoomId, saveSharedRoom]);
 
   /* ---------------------------
      Fetch helpers
@@ -448,7 +479,7 @@ export default function App() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const roomId = params.get("room");
-    if (roomId) {
+    if (roomId && db) {
       // Check if room exists in current rooms
       const roomExists = rooms.some(r => r.id === roomId);
       if (roomExists) {
@@ -457,12 +488,55 @@ export default function App() {
         const newUrl = window.location.pathname;
         window.history.replaceState({}, "", newUrl);
       } else {
-        // Room doesn't exist yet - set it anyway and user can see it
-        setCurrentRoomId(roomId);
-        setAppStatus("Joining room...");
+        // Fetch shared room from Firebase and add to user's list
+        fetchSharedRoom(roomId).then(sharedRoom => {
+          if (sharedRoom) {
+            // Add room to user's local list
+            setRooms(prev => {
+              const exists = prev.some(r => r.id === roomId);
+              if (!exists) {
+                const newRooms = [...prev, {
+                  id: sharedRoom.id,
+                  name: sharedRoom.name || `Room ${roomId.substring(0, 8)}`,
+                  usernames: sharedRoom.usernames || []
+                }];
+                saveUserRooms(newRooms);
+                return newRooms;
+              }
+              return prev;
+            });
+            setCurrentRoomId(roomId);
+            setAppStatus("Joined room!");
+            // Clean URL after joining
+            const newUrl = window.location.pathname;
+            window.history.replaceState({}, "", newUrl);
+          } else {
+            // Room doesn't exist - create it in shared collection
+            const newRoom = {
+              id: roomId,
+              name: `Room ${roomId.substring(0, 8)}`,
+              usernames: []
+            };
+            saveSharedRoom(newRoom);
+            setRooms(prev => {
+              const exists = prev.some(r => r.id === roomId);
+              if (!exists) {
+                const newRooms = [...prev, newRoom];
+                saveUserRooms(newRooms);
+                return newRooms;
+              }
+              return prev;
+            });
+            setCurrentRoomId(roomId);
+            setAppStatus("Created new room");
+            // Clean URL after joining
+            const newUrl = window.location.pathname;
+            window.history.replaceState({}, "", newUrl);
+          }
+        });
       }
     }
-  }, [rooms]);
+  }, [rooms, db, fetchSharedRoom, saveUserRooms]);
 
   // Close room modal when clicking outside
   useEffect(() => {
@@ -499,8 +573,11 @@ export default function App() {
       name,
       usernames: []
     };
+    // Save to shared collection first
+    saveSharedRoom(newRoom);
+    // Then add to user's local list
     const updatedRooms = [...rooms, newRoom];
-    saveRooms(updatedRooms);
+    saveUserRooms(updatedRooms);
     setCurrentRoomId(newRoom.id);
     setNewRoomName("");
     setShowRoomModal(false);
@@ -514,7 +591,7 @@ export default function App() {
       return;
     }
     const updatedRooms = rooms.filter(r => r.id !== roomId);
-    saveRooms(updatedRooms);
+    saveUserRooms(updatedRooms);
     if (currentRoomId === roomId) {
       setCurrentRoomId(updatedRooms[0].id);
     }
@@ -550,7 +627,15 @@ export default function App() {
     const updatedRooms = rooms.map(r => 
       r.id === editingRoomId ? { ...r, name } : r
     );
-    saveRooms(updatedRooms);
+    // Update shared room name
+    const roomToUpdate = rooms.find(r => r.id === editingRoomId);
+    if (roomToUpdate && db) {
+      const roomPath = typeof __app_id !== "undefined"
+        ? `/artifacts/${appId}/rooms/${editingRoomId}`
+        : `rooms/${editingRoomId}`;
+      setDoc(doc(db, roomPath), { name }, { merge: true });
+    }
+    saveUserRooms(updatedRooms);
     setEditingRoomId(null);
     setEditingRoomName("");
     playBeep();
