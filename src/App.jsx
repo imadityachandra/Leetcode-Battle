@@ -356,20 +356,22 @@ export default function App() {
      --------------------------- */
   const fetchWithRetry = useCallback(async (url) => {
     let tries = 0;
-    while (tries < 3) {
+    while (tries < 2) { // Reduced retries to avoid hitting limits
       try {
         const res = await fetch(url);
         if (res.status === 429) {
-          // Rate limited - wait longer and skip this request
-          console.warn("Rate limited (429), skipping request");
+          // Rate limited - throw immediately without retry
+          const errorText = await res.text().catch(() => "");
+          console.warn("Rate limited (429), skipping request", errorText);
           throw new Error("Rate limited");
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return await res.json();
       } catch (e) {
         tries++;
-        if (tries >= 3 || e.message === "Rate limited") throw e;
-        await new Promise(r => setTimeout(r, 400 * Math.pow(2, tries)));
+        if (tries >= 2 || e.message === "Rate limited") throw e;
+        // Longer delay between retries
+        await new Promise(r => setTimeout(r, 1000 * Math.pow(2, tries)));
       }
     }
   }, []);
@@ -415,7 +417,7 @@ export default function App() {
         const [profile, solved, submission] = await Promise.all([
           fetchWithRetry(`${API_BASE_URL}/${user}`),
           fetchWithRetry(`${API_BASE_URL}/${user}/solved`),
-          fetchWithRetry(`${API_BASE_URL}/${user}/submission?limit=20`)
+          fetchWithRetry(`${API_BASE_URL}/${user}/submission?limit=10`)
         ]);
         if (profile?.errors || solved?.errors) return { username: user, error: true };
         const { daily, weekly } = processRecentSubmissions(submission);
@@ -821,8 +823,16 @@ export default function App() {
     if (!warState || !warState.active || warState.winner || !warState.problemSlug) return;
     
     let checkInterval;
+    let isRateLimited = false;
+    let backoffTimeout = null;
     
     const checkSubmissions = async () => {
+      // Skip if rate limited - wait for backoff period
+      if (isRateLimited) {
+        console.log("Skipping check - rate limited, waiting...");
+        return;
+      }
+      
       // Use current warState from closure, but also get latest from state
       const currentWar = warState;
       if (!currentWar || !currentWar.active || currentWar.winner) {
@@ -836,14 +846,17 @@ export default function App() {
         let hasUpdates = false;
         
         // Check each participant's recent submissions for the specific problem
-        // Add delay between requests to avoid rate limits
-        const checks = currentWar.participants.map(async (username, index) => {
-          // Stagger requests to avoid hitting rate limits
+        // Process sequentially with longer delays to avoid rate limits
+        for (let index = 0; index < currentWar.participants.length; index++) {
+          const username = currentWar.participants[index];
+          
+          // Longer delay between requests (2 seconds per user)
           if (index > 0) {
-            await new Promise(r => setTimeout(r, 500 * index)); // 500ms delay between each user
+            await new Promise(r => setTimeout(r, 2000)); // 2 second delay between each user
           }
+          
           try {
-            const submission = await fetchWithRetry(`${API_BASE_URL}/${username}/submission?limit=20`);
+            const submission = await fetchWithRetry(`${API_BASE_URL}/${username}/submission?limit=10`);
             if (submission && Array.isArray(submission) && submission.length > 0) {
               // Find submissions for this specific problem after war start time
               let foundMatch = false;
@@ -907,15 +920,30 @@ export default function App() {
               }
             }
           } catch (e) {
-            // Silently handle rate limit errors to avoid spam
-            if (e.message !== "Rate limited") {
+            // Handle rate limit errors with backoff
+            if (e.message === "Rate limited" || e.message?.includes("429")) {
+              console.warn("Rate limited detected, pausing checks for 10 minutes");
+              isRateLimited = true;
+              // Clear current interval
+              if (checkInterval) {
+                clearInterval(checkInterval);
+                checkInterval = null;
+              }
+              // Clear any existing backoff timeout
+              if (backoffTimeout) clearTimeout(backoffTimeout);
+              // Set backoff period (10 minutes)
+              backoffTimeout = setTimeout(() => {
+                isRateLimited = false;
+                backoffTimeout = null;
+                // Restart checking with longer interval (5 minutes)
+                checkInterval = setInterval(checkSubmissions, 5 * 60 * 1000);
+              }, 10 * 60 * 1000); // 10 minutes backoff
+              break; // Stop checking other users
+            } else {
               console.error(`Error checking ${username}:`, e);
             }
           }
-          return null;
-        });
-        
-        await Promise.all(checks);
+        }
         
         // Always update submissions state (even if no new ones found, sync existing ones)
         // This ensures UI stays in sync with Firebase
@@ -942,12 +970,13 @@ export default function App() {
       }
     };
     
-    // Run immediately, then set interval (longer interval to avoid rate limits)
+    // Run immediately, then set interval (much longer interval to avoid rate limits)
     checkSubmissions();
-    checkInterval = setInterval(checkSubmissions, 30000); // Check every 30 seconds
+    checkInterval = setInterval(checkSubmissions, 2 * 60 * 1000); // Check every 2 minutes
     
     return () => {
       if (checkInterval) clearInterval(checkInterval);
+      if (backoffTimeout) clearTimeout(backoffTimeout);
     };
   }, [warState?.active, warState?.startTime, warState?.participants, warState?.problemSlug, warState?.winner, saveSharedRoom, fetchWithRetry]);
 
