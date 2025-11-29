@@ -21,7 +21,9 @@ import {
   DoorOpen,
   Edit,
   X,
-  Check
+  Check,
+  User,
+  CheckCircle
 } from "lucide-react";
 
 // Firebase (avoid duplicate init)
@@ -104,6 +106,8 @@ export default function App() {
   const [newRoomName, setNewRoomName] = useState("");
   const [editingRoomId, setEditingRoomId] = useState(null);
   const [editingRoomName, setEditingRoomName] = useState("");
+  const [linkCopied, setLinkCopied] = useState(false);
+  const [currentUser, setCurrentUser] = useState(null);
 
   // Firestore doc path (includes roomId)
   const FRIENDS_DOC_PATH = currentUserId
@@ -132,6 +136,10 @@ export default function App() {
         try {
           if (user) {
             setCurrentUserId(user.uid);
+            setCurrentUser(user);
+            // Generate a short user identifier
+            const shortId = user.uid.substring(0, 8);
+            localStorage.setItem("lb_userId", shortId);
           } else if (initialAuthToken) {
             await signInWithCustomToken(authentication, initialAuthToken);
           } else {
@@ -436,12 +444,23 @@ export default function App() {
     document.documentElement.setAttribute("data-theme", theme);
   }, []);
 
-  // Load room from URL parameter
+  // Load room from URL parameter - allows others to join rooms via shared link
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const roomId = params.get("room");
-    if (roomId && rooms.some(r => r.id === roomId)) {
-      setCurrentRoomId(roomId);
+    if (roomId) {
+      // Check if room exists in current rooms
+      const roomExists = rooms.some(r => r.id === roomId);
+      if (roomExists) {
+        setCurrentRoomId(roomId);
+        // Clean URL after joining
+        const newUrl = window.location.pathname;
+        window.history.replaceState({}, "", newUrl);
+      } else {
+        // Room doesn't exist yet - set it anyway and user can see it
+        setCurrentRoomId(roomId);
+        setAppStatus("Joining room...");
+      }
     }
   }, [rooms]);
 
@@ -541,6 +560,29 @@ export default function App() {
     setEditingRoomId(null);
     setEditingRoomName("");
   };
+
+  /* ---------------------------
+     Share room link functionality
+     --------------------------- */
+  const copyRoomLink = () => {
+    const url = `${window.location.origin}${window.location.pathname}?room=${currentRoomId}`;
+    navigator.clipboard?.writeText(url).then(() => {
+      setLinkCopied(true);
+      playBeep();
+      setTimeout(() => setLinkCopied(false), 2000);
+    }).catch(() => {
+      setError("Failed to copy link");
+      setTimeout(() => setError(null), 2000);
+    });
+  };
+
+  // Get short user ID for display
+  const shortUserId = useMemo(() => {
+    if (currentUser?.uid) {
+      return currentUser.uid.substring(0, 8);
+    }
+    return localStorage.getItem("lb_userId") || "guest";
+  }, [currentUser]);
 
   /* ---------------------------
      UI small components
@@ -781,7 +823,25 @@ export default function App() {
         .placeholder { background:var(--card); border-radius:12px; height:86px; border:1px solid var(--border); transition: background-color 0.3s ease, border-color 0.3s ease; }
 
         /* footer actions */
-        .footer { display:flex; justify-content:space-between; align-items:center; margin-top:16px; color:var(--muted); }
+        .footer { display:flex; flex-direction:column; gap:16px; margin-top:24px; padding-top:20px; border-top:1px solid var(--border); }
+        .footer-top { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; }
+        .footer-bottom { display:flex; justify-content:center; align-items:center; gap:6px; color:var(--muted); font-size:14px; padding:8px 0; }
+        .footer-love { display:flex; align-items:center; gap:6px; }
+        .footer-love-heart { color:#ef4444; animation: heartbeat 1.5s ease-in-out infinite; }
+        @keyframes heartbeat { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.1); } }
+
+        /* current user display */
+        .current-user { display:flex; align-items:center; gap:8px; padding:8px 12px; border-radius:10px; background:var(--card); border:1px solid var(--border); box-shadow: var(--shadow); }
+        .current-user-avatar { width:32px; height:32px; border-radius:8px; background:linear-gradient(180deg,#60a5fa,#7c3aed); display:flex; align-items:center; justify-content:center; color:white; font-weight:700; font-size:12px; }
+        [data-theme="neon"] .current-user-avatar { background:linear-gradient(180deg,#3b82f6,#8b5cf6); box-shadow: 0 0 10px rgba(139, 92, 246, 0.4); }
+        .current-user-info { display:flex; flex-direction:column; gap:2px; }
+        .current-user-label { font-size:11px; color:var(--muted); text-transform:uppercase; }
+        .current-user-id { font-size:13px; font-weight:700; color:var(--text); }
+
+        /* share button */
+        .share-btn-wrapper { position:relative; }
+        .share-btn-copied { position:absolute; top:-40px; left:50%; transform:translateX(-50%); background:var(--card); border:1px solid var(--border); padding:6px 12px; border-radius:8px; box-shadow:var(--shadow); white-space:nowrap; font-size:12px; color:var(--text); display:flex; align-items:center; gap:6px; z-index:10; }
+        .share-btn-copied::after { content:""; position:absolute; bottom:-4px; left:50%; transform:translateX(-50%); width:8px; height:8px; background:var(--card); border-right:1px solid var(--border); border-bottom:1px solid var(--border); transform:translateX(-50%) rotate(45deg); }
 
         /* error toast */
         .toast { position:fixed; right:20px; bottom:20px; background: var(--card); color:#b91c1c; border:1px solid #fee2e2; padding:10px 14px; border-radius:12px; box-shadow: 0 8px 30px rgba(17,24,39,0.06); transition: background-color 0.3s ease; }
@@ -825,6 +885,9 @@ export default function App() {
           .leader-right { width:86px; }
           .add-form input { padding-right:96px; }
           .room-dropdown { min-width:240px; }
+          .current-user { order: -1; width: 100%; }
+          .footer-top { flex-direction: column; align-items: stretch; }
+          .footer-top button { width: 100%; justify-content: center; }
         }
       `}</style>
 
@@ -838,6 +901,18 @@ export default function App() {
               <div className="status">{appStatus}</div>
             </div>
           </div>
+
+          {currentUser && (
+            <div className="current-user">
+              <div className="current-user-avatar">
+                <User className="icon" style={{ width: 16, height: 16 }} />
+              </div>
+              <div className="current-user-info">
+                <div className="current-user-label">You</div>
+                <div className="current-user-id">{shortUserId}</div>
+              </div>
+            </div>
+          )}
 
           <div className="controls">
             <div className="room-selector">
@@ -1048,14 +1123,28 @@ export default function App() {
             </div>
 
             <div className="footer">
-              <div className="muted">Made with ❤️ in Panathur, Bangalore</div>
-              <div style={{ display:"flex", gap:8 }}>
-                <button className="btn-outline" onClick={() => { 
-                  const url = `${window.location.origin}${window.location.pathname}?room=${currentRoomId}`;
-                  navigator.clipboard?.writeText(url); 
-                  playBeep(); 
-                }}>Share Room</button>
-                <button className="btn-outline" onClick={() => alert("Settings coming soon")}><Settings className="icon" /></button>
+              <div className="footer-top">
+                <div className="share-btn-wrapper">
+                  {linkCopied && (
+                    <div className="share-btn-copied">
+                      <CheckCircle className="icon" style={{ width: 14, height: 14 }} />
+                      Link copied!
+                    </div>
+                  )}
+                  <button className="btn-outline" onClick={copyRoomLink}>
+                    <Share2 className="icon" /> Share Room Link
+                  </button>
+                </div>
+                <button className="btn-outline" onClick={() => alert("Settings coming soon")}>
+                  <Settings className="icon" />
+                </button>
+              </div>
+              <div className="footer-bottom">
+                <div className="footer-love">
+                  <span>Made with</span>
+                  <span className="footer-love-heart">❤️</span>
+                  <span>in Panathur, Bangalore</span>
+                </div>
               </div>
             </div>
           </div>
