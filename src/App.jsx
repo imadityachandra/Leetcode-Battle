@@ -23,7 +23,11 @@ import {
   X,
   Check,
   User,
-  CheckCircle
+  CheckCircle,
+  Play,
+  Timer,
+  Target,
+  Award
 } from "lucide-react";
 
 // Firebase (avoid duplicate init)
@@ -108,6 +112,10 @@ export default function App() {
   const [editingRoomName, setEditingRoomName] = useState("");
   const [linkCopied, setLinkCopied] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
+  
+  // War state
+  const [warState, setWarState] = useState(null); // { active: bool, problemLink: string, startTime: number, duration: number, winner: string }
+  const [warTimer, setWarTimer] = useState(0); // seconds remaining
 
   // Firestore doc paths
   // Shared room path - all users access the same room data
@@ -183,8 +191,8 @@ export default function App() {
   const saveUserRooms = useCallback(async (roomsData) => {
     if (!db || !currentUserId || !USER_ROOMS_PATH) {
       setRooms(roomsData);
-      return;
-    }
+        return;
+      }
     try {
       await setDoc(doc(db, USER_ROOMS_PATH), { rooms: roomsData });
       setRooms(roomsData);
@@ -231,7 +239,7 @@ export default function App() {
     const docRef = doc(db, USER_ROOMS_PATH);
     const unsub = onSnapshot(docRef, (snap) => {
       if (snap.exists()) {
-        const data = snap.data();
+      const data = snap.data();
         if (data?.rooms && Array.isArray(data.rooms) && data.rooms.length > 0) {
           setRooms(data.rooms);
           // Ensure current room exists
@@ -255,7 +263,13 @@ export default function App() {
       if (snap.exists()) {
         const data = snap.data();
         // Update friends list from shared room
-        setFriendUsernames(data?.usernames || []);
+      setFriendUsernames(data?.usernames || []);
+        // Update war state
+        if (data?.war) {
+          setWarState(data.war);
+        } else {
+          setWarState(null);
+        }
         // Update local rooms state with shared room data
         setRooms(prev => {
           const roomIndex = prev.findIndex(r => r.id === currentRoomId);
@@ -287,7 +301,7 @@ export default function App() {
 
   const saveFriendsList = useCallback(async (usernames) => {
     // Update local state immediately
-    setFriendUsernames(usernames);
+      setFriendUsernames(usernames);
     setRooms(prev => prev.map(r => 
       r.id === currentRoomId ? { ...r, usernames } : r
     ));
@@ -647,6 +661,149 @@ export default function App() {
   };
 
   /* ---------------------------
+     War functionality
+     --------------------------- */
+  // Get random LeetCode problem
+  const getRandomProblem = async () => {
+    try {
+      // Use LeetCode's problem list API or generate random problem slug
+      // For now, we'll use a curated list of popular problems
+      const problems = [
+        "two-sum",
+        "add-two-numbers",
+        "longest-substring-without-repeating-characters",
+        "median-of-two-sorted-arrays",
+        "longest-palindromic-substring",
+        "zigzag-conversion",
+        "reverse-integer",
+        "string-to-integer-atoi",
+        "palindrome-number",
+        "container-with-most-water",
+        "3sum",
+        "longest-common-prefix",
+        "valid-parentheses",
+        "merge-two-sorted-lists",
+        "remove-duplicates-from-sorted-array",
+        "remove-element",
+        "find-the-index-of-the-first-occurrence-in-a-string",
+        "search-insert-position",
+        "length-of-last-word",
+        "plus-one"
+      ];
+      const randomProblem = problems[Math.floor(Math.random() * problems.length)];
+      return `https://leetcode.com/problems/${randomProblem}/`;
+    } catch (e) {
+      console.error("Error getting random problem:", e);
+      return "https://leetcode.com/problemset/all/";
+    }
+  };
+
+  // Start war
+  const startWar = async () => {
+    if (friendUsernames.length === 0) {
+      setError("Add usernames to start a war!");
+      setTimeout(() => setError(null), 2200);
+      return;
+    }
+    
+    const problemLink = await getRandomProblem();
+    const warDuration = 3600; // 1 hour in seconds
+    const startTime = Date.now();
+    
+    const newWarState = {
+      active: true,
+      problemLink,
+      startTime,
+      duration: warDuration,
+      winner: null,
+      participants: friendUsernames
+    };
+    
+    // Save to shared room
+    await saveSharedRoom({ war: newWarState });
+    setWarState(newWarState);
+    setWarTimer(warDuration);
+    playBeep();
+  };
+
+  // Check for winner by polling submissions
+  useEffect(() => {
+    if (!warState || !warState.active || warState.winner) return;
+    
+    const checkInterval = setInterval(async () => {
+      if (!warState || !warState.active || warState.winner) {
+        return;
+      }
+      
+      try {
+        // Check each participant's recent submissions
+        const checks = warState.participants.map(async (username) => {
+          try {
+            const submission = await fetchWithRetry(`${API_BASE_URL}/${username}/submission?limit=10`);
+            if (submission && Array.isArray(submission) && submission.length > 0) {
+              // Find first accepted submission after war start time
+              for (const sub of submission) {
+                if (sub.statusDisplay === "Accepted") {
+                  const submissionTime = parseInt(sub.timestamp || "0", 10) * 1000;
+                  if (submissionTime >= warState.startTime) {
+                    return username;
+                  }
+                }
+              }
+            }
+          } catch (e) {
+            console.error(`Error checking ${username}:`, e);
+          }
+          return null;
+        });
+        
+        const results = await Promise.all(checks);
+        const winner = results.find(r => r !== null);
+        
+        if (winner) {
+          // Update war state with winner
+          const updatedWar = { ...warState, active: false, winner };
+          await saveSharedRoom({ war: updatedWar });
+          setWarState(updatedWar);
+          clearInterval(checkInterval);
+          playBeep();
+          burstMicro(document.getElementById("burst-root"), 20);
+        }
+      } catch (e) {
+        console.error("Error checking for winner:", e);
+      }
+    }, 10000); // Check every 10 seconds
+    
+    return () => clearInterval(checkInterval);
+  }, [warState?.active, warState?.startTime, warState?.participants, saveSharedRoom, fetchWithRetry]);
+
+  // Timer effect
+  useEffect(() => {
+    if (!warState || !warState.active || warState.winner) {
+      setWarTimer(0);
+      return;
+    }
+    
+    const updateTimer = () => {
+      const elapsed = Math.floor((Date.now() - warState.startTime) / 1000);
+      const remaining = Math.max(0, warState.duration - elapsed);
+      setWarTimer(remaining);
+      
+      if (remaining === 0 && warState.active) {
+        // War ended without winner
+        const updatedWar = { ...warState, active: false };
+        saveSharedRoom({ war: updatedWar });
+        setWarState(updatedWar);
+      }
+    };
+    
+    updateTimer();
+    const interval = setInterval(updateTimer, 1000);
+    return () => clearInterval(interval);
+  }, [warState, saveSharedRoom]);
+
+
+  /* ---------------------------
      Share room link functionality
      --------------------------- */
   const copyRoomLink = () => {
@@ -928,6 +1085,27 @@ export default function App() {
         .share-btn-copied { position:absolute; top:-40px; left:50%; transform:translateX(-50%); background:var(--card); border:1px solid var(--border); padding:6px 12px; border-radius:8px; box-shadow:var(--shadow); white-space:nowrap; font-size:12px; color:var(--text); display:flex; align-items:center; gap:6px; z-index:10; }
         .share-btn-copied::after { content:""; position:absolute; bottom:-4px; left:50%; transform:translateX(-50%); width:8px; height:8px; background:var(--card); border-right:1px solid var(--border); border-bottom:1px solid var(--border); transform:translateX(-50%) rotate(45deg); }
 
+        /* war UI */
+        .war-card { background:var(--card); border:2px solid var(--border); border-radius:var(--radius); padding:20px; margin-bottom:20px; box-shadow:var(--shadow); }
+        .war-card.active { border-color:#ef4444; box-shadow: 0 0 20px rgba(239,68,68,0.3); }
+        [data-theme="neon"] .war-card.active { border-color:#8b5cf6; box-shadow: 0 0 30px rgba(139,92,246,0.5); }
+        .war-header { display:flex; align-items:center; gap:12px; margin-bottom:16px; }
+        .war-title { font-size:20px; font-weight:800; display:flex; align-items:center; gap:8px; }
+        .war-timer { font-size:32px; font-weight:900; color:#ef4444; font-variant-numeric:tabular-nums; }
+        [data-theme="neon"] .war-timer { color:#8b5cf6; text-shadow: 0 0 10px rgba(139,92,246,0.5); }
+        .war-problem-link { display:inline-flex; align-items:center; gap:8px; padding:10px 16px; background:linear-gradient(90deg,#06b6d4,#7c3aed); color:white; border-radius:10px; text-decoration:none; font-weight:700; margin-top:12px; transition: transform 0.2s ease; }
+        .war-problem-link:hover { transform: translateY(-2px); }
+        [data-theme="neon"] .war-problem-link { background:linear-gradient(90deg,#3b82f6,#8b5cf6); box-shadow: 0 4px 15px rgba(139,92,246,0.4); }
+        .war-winner { display:flex; align-items:center; gap:12px; padding:16px; background:linear-gradient(90deg,#fef3c7,#fde68a); border-radius:12px; margin-top:16px; }
+        [data-theme="dark"] .war-winner { background:linear-gradient(90deg,#78350f,#92400e); }
+        [data-theme="neon"] .war-winner { background:linear-gradient(90deg,#3b82f6,#8b5cf6); box-shadow: 0 0 20px rgba(139,92,246,0.4); }
+        .war-winner-name { font-size:18px; font-weight:900; }
+        .start-war-btn { padding:12px 24px; border-radius:12px; border:0; background:linear-gradient(90deg,#ef4444,#dc2626); color:white; font-weight:800; font-size:16px; cursor:pointer; display:inline-flex; align-items:center; gap:8px; box-shadow: 0 8px 20px rgba(239,68,68,0.3); transition: transform 0.2s ease; }
+        .start-war-btn:hover { transform: translateY(-2px); }
+        .start-war-btn:active { transform: translateY(0); }
+        [data-theme="neon"] .start-war-btn { background:linear-gradient(90deg,#8b5cf6,#7c3aed); box-shadow: 0 8px 20px rgba(139,92,246,0.4); }
+        .war-status { font-size:14px; color:var(--muted); margin-top:8px; }
+
         /* error toast */
         .toast { position:fixed; right:20px; bottom:20px; background: var(--card); color:#b91c1c; border:1px solid #fee2e2; padding:10px 14px; border-radius:12px; box-shadow: 0 8px 30px rgba(17,24,39,0.06); transition: background-color 0.3s ease; }
         [data-theme="dark"] .toast { background: #7f1d1d; border-color: #991b1b; }
@@ -1178,6 +1356,67 @@ export default function App() {
 
           {/* main leaderboard */}
           <div>
+            {/* War Card */}
+            {warState && warState.active ? (
+              <div className="war-card active">
+                <div className="war-header">
+                  <div className="war-title">
+                    <Sword className="icon" style={{ width: 24, height: 24 }} />
+                    War Active!
+                  </div>
+                </div>
+                <div className="war-timer">
+                  {Math.floor(warTimer / 60)}:{(warTimer % 60).toString().padStart(2, '0')}
+                </div>
+                <div className="war-status">Time remaining</div>
+                <a href={warState.problemLink} target="_blank" rel="noopener noreferrer" className="war-problem-link">
+                  <Target className="icon" style={{ width: 18, height: 18 }} />
+                  Solve Problem
+                </a>
+                <div className="war-status" style={{ marginTop: 12 }}>
+                  Participants: {warState.participants?.join(", ") || "None"}
+                </div>
+              </div>
+            ) : warState && warState.winner ? (
+              <div className="war-card">
+                <div className="war-header">
+                  <div className="war-title">
+                    <Award className="icon" style={{ width: 24, height: 24 }} />
+                    War Ended
+                  </div>
+                </div>
+                <div className="war-winner">
+                  <Crown className="icon" style={{ width: 32, height: 32, color: "#d97706" }} />
+                  <div>
+                    <div className="war-status">Winner</div>
+                    <div className="war-winner-name">{warState.winner}</div>
+                  </div>
+                </div>
+                <a href={warState.problemLink} target="_blank" rel="noopener noreferrer" className="war-problem-link" style={{ marginTop: 16 }}>
+                  <Target className="icon" style={{ width: 18, height: 18 }} />
+                  View Problem
+                </a>
+              </div>
+            ) : (
+              <div className="card" style={{ marginBottom: 20 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div>
+                    <h3 style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+                      <Sword className="icon" style={{ width: 20, height: 20 }} />
+                      Start War
+                    </h3>
+                    <div className="muted" style={{ marginTop: 4 }}>
+                      Compete to solve a problem first!
+                    </div>
+                  </div>
+                  <button className="start-war-btn" onClick={startWar}>
+                    <Play className="icon" style={{ width: 18, height: 18 }} />
+                    Start War
+                  </button>
+                </div>
+              </div>
+            )}
+
             <div className="card">
               <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
                 <div style={{ display:"flex", gap:10, alignItems:"center" }}>
@@ -1214,12 +1453,12 @@ export default function App() {
                     <div className="share-btn-copied">
                       <CheckCircle className="icon" style={{ width: 14, height: 14 }} />
                       Link copied!
-                    </div>
+              </div>
                   )}
                   <button className="btn-outline" onClick={copyRoomLink}>
                     <Share2 className="icon" /> Share Room Link
                   </button>
-                </div>
+            </div>
                 <button className="btn-outline" onClick={() => alert("Settings coming soon")}>
                   <Settings className="icon" />
                 </button>
