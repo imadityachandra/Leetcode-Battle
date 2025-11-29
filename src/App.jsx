@@ -359,11 +359,16 @@ export default function App() {
     while (tries < 3) {
       try {
         const res = await fetch(url);
+        if (res.status === 429) {
+          // Rate limited - wait longer and skip this request
+          console.warn("Rate limited (429), skipping request");
+          throw new Error("Rate limited");
+        }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return await res.json();
       } catch (e) {
         tries++;
-        if (tries >= 3) throw e;
+        if (tries >= 3 || e.message === "Rate limited") throw e;
         await new Promise(r => setTimeout(r, 400 * Math.pow(2, tries)));
       }
     }
@@ -410,7 +415,7 @@ export default function App() {
         const [profile, solved, submission] = await Promise.all([
           fetchWithRetry(`${API_BASE_URL}/${user}`),
           fetchWithRetry(`${API_BASE_URL}/${user}/solved`),
-          fetchWithRetry(`${API_BASE_URL}/${user}/submission?limit=50`)
+          fetchWithRetry(`${API_BASE_URL}/${user}/submission?limit=20`)
         ]);
         if (profile?.errors || solved?.errors) return { username: user, error: true };
         const { daily, weekly } = processRecentSubmissions(submission);
@@ -831,9 +836,14 @@ export default function App() {
         let hasUpdates = false;
         
         // Check each participant's recent submissions for the specific problem
-        const checks = currentWar.participants.map(async (username) => {
+        // Add delay between requests to avoid rate limits
+        const checks = currentWar.participants.map(async (username, index) => {
+          // Stagger requests to avoid hitting rate limits
+          if (index > 0) {
+            await new Promise(r => setTimeout(r, 500 * index)); // 500ms delay between each user
+          }
           try {
-            const submission = await fetchWithRetry(`${API_BASE_URL}/${username}/submission?limit=100`);
+            const submission = await fetchWithRetry(`${API_BASE_URL}/${username}/submission?limit=20`);
             if (submission && Array.isArray(submission) && submission.length > 0) {
               // Find submissions for this specific problem after war start time
               let foundMatch = false;
@@ -897,7 +907,10 @@ export default function App() {
               }
             }
           } catch (e) {
-            console.error(`Error checking ${username}:`, e);
+            // Silently handle rate limit errors to avoid spam
+            if (e.message !== "Rate limited") {
+              console.error(`Error checking ${username}:`, e);
+            }
           }
           return null;
         });
@@ -929,9 +942,9 @@ export default function App() {
       }
     };
     
-    // Run immediately, then set interval
+    // Run immediately, then set interval (longer interval to avoid rate limits)
     checkSubmissions();
-    checkInterval = setInterval(checkSubmissions, 10000); // Check every 10 seconds
+    checkInterval = setInterval(checkSubmissions, 30000); // Check every 30 seconds
     
     return () => {
       if (checkInterval) clearInterval(checkInterval);
