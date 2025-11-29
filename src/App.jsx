@@ -270,9 +270,11 @@ export default function App() {
         // Update war state (room-specific)
         if (data?.war) {
           setWarState(data.war);
-          // Update submissions if available
+          // Update submissions if available (always sync from Firebase)
           if (data.war.submissions) {
             setWarSubmissions(data.war.submissions);
+          } else {
+            setWarSubmissions({});
           }
         } else {
           setWarState(null);
@@ -285,12 +287,19 @@ export default function App() {
             const updated = [...prev];
             updated[roomIndex] = {
               ...updated[roomIndex],
-              name: data.name || updated[roomIndex].name,
+              name: data.name || updated[roomIndex].name || (currentRoomId === "default" ? "Default Room" : `Room ${currentRoomId.substring(0, 8)}`),
               usernames: data.usernames || []
             };
             return updated;
+          } else {
+            // Room not in local list - add it with data from Firebase
+            const newRoom = {
+              id: currentRoomId,
+              name: data.name || (currentRoomId === "default" ? "Default Room" : `Room ${currentRoomId.substring(0, 8)}`),
+              usernames: data.usernames || []
+            };
+            return [...prev, newRoom];
           }
-          return prev;
         });
       } else {
         // Room doesn't exist in Firebase yet - initialize it (especially for default room)
@@ -321,22 +330,26 @@ export default function App() {
 
   const saveFriendsList = useCallback(async (usernames) => {
     // Update local state immediately
-      setFriendUsernames(usernames);
+    setFriendUsernames(usernames);
     setRooms(prev => prev.map(r => 
       r.id === currentRoomId ? { ...r, usernames } : r
     ));
 
-    // Save to shared room in Firebase
+    // Save to shared room in Firebase (include name to ensure it's synced)
     if (!db || !SHARED_ROOM_PATH) {
       return;
     }
     try {
-      await saveSharedRoom({ usernames });
+      const currentRoom = rooms.find(r => r.id === currentRoomId);
+      await saveSharedRoom({ 
+        usernames,
+        name: currentRoom?.name || "Default Room"
+      });
     } catch (e) {
       console.error("saveFriendsList error:", e);
       setError("Failed to save friend list.");
     }
-  }, [db, SHARED_ROOM_PATH, currentRoomId, saveSharedRoom]);
+  }, [db, SHARED_ROOM_PATH, currentRoomId, saveSharedRoom, rooms]);
 
   /* ---------------------------
      Fetch helpers
@@ -518,10 +531,11 @@ export default function App() {
       // This ensures default room and other rooms are properly synced
       fetchSharedRoom(roomId).then(sharedRoom => {
         if (sharedRoom) {
-          // Room exists in Firebase - add to user's local list if not already there
+          // Room exists in Firebase - update user's local list with latest data
           setRooms(prev => {
             const exists = prev.some(r => r.id === roomId);
             if (!exists) {
+              // Add new room to list
               const newRooms = [...prev, {
                 id: sharedRoom.id,
                 name: sharedRoom.name || (roomId === "default" ? "Default Room" : `Room ${roomId.substring(0, 8)}`),
@@ -529,9 +543,23 @@ export default function App() {
               }];
               saveUserRooms(newRooms);
               return newRooms;
+            } else {
+              // Update existing room with latest data from Firebase (prioritize Firebase data)
+              const updated = prev.map(r => 
+                r.id === roomId 
+                  ? {
+                      ...r,
+                      name: sharedRoom.name || r.name || (roomId === "default" ? "Default Room" : `Room ${roomId.substring(0, 8)}`),
+                      usernames: sharedRoom.usernames || []
+                    }
+                  : r
+              );
+              saveUserRooms(updated);
+              return updated;
             }
-            return prev;
           });
+          // Update friend usernames immediately from shared room
+          setFriendUsernames(sharedRoom.usernames || []);
           setCurrentRoomId(roomId);
           setAppStatus("Joined room!");
           // Clean URL after joining
@@ -551,9 +579,16 @@ export default function App() {
               const newRooms = [...prev, newRoom];
               saveUserRooms(newRooms);
               return newRooms;
+            } else {
+              // Update existing room
+              const updated = prev.map(r => 
+                r.id === roomId ? { ...r, ...newRoom } : r
+              );
+              saveUserRooms(updated);
+              return updated;
             }
-            return prev;
           });
+          setFriendUsernames([]);
           setCurrentRoomId(roomId);
           setAppStatus("Created new room");
           // Clean URL after joining
@@ -595,7 +630,7 @@ export default function App() {
   /* ---------------------------
      Room management functions
      --------------------------- */
-  const createRoom = () => {
+  const createRoom = async () => {
     const name = newRoomName.trim() || `Room ${rooms.length + 1}`;
     if (rooms.some(r => r.name.toLowerCase() === name.toLowerCase())) {
       setError(`Room "${name}" already exists`);
@@ -607,11 +642,15 @@ export default function App() {
       name,
       usernames: []
     };
-    // Save to shared collection first
-    saveSharedRoom(newRoom);
+    // Save to shared collection first (with explicit name and usernames)
+    await saveSharedRoom({ 
+      id: newRoom.id,
+      name: newRoom.name,
+      usernames: newRoom.usernames 
+    });
     // Then add to user's local list
     const updatedRooms = [...rooms, newRoom];
-    saveUserRooms(updatedRooms);
+    await saveUserRooms(updatedRooms);
     setCurrentRoomId(newRoom.id);
     setNewRoomName("");
     setShowRoomModal(false);
@@ -661,13 +700,16 @@ export default function App() {
     const updatedRooms = rooms.map(r => 
       r.id === editingRoomId ? { ...r, name } : r
     );
-    // Update shared room name
+    // Update shared room name in Firebase (also include usernames to keep data in sync)
     const roomToUpdate = rooms.find(r => r.id === editingRoomId);
     if (roomToUpdate && db) {
       const roomPath = typeof __app_id !== "undefined"
         ? `/artifacts/${appId}/rooms/${editingRoomId}`
         : `rooms/${editingRoomId}`;
-      setDoc(doc(db, roomPath), { name }, { merge: true });
+      setDoc(doc(db, roomPath), { 
+        name,
+        usernames: roomToUpdate.usernames || []
+      }, { merge: true });
     }
     saveUserRooms(updatedRooms);
     setEditingRoomId(null);
@@ -773,51 +815,85 @@ export default function App() {
   useEffect(() => {
     if (!warState || !warState.active || warState.winner || !warState.problemSlug) return;
     
-    const checkInterval = setInterval(async () => {
-      if (!warState || !warState.active || warState.winner) {
+    let checkInterval;
+    
+    const checkSubmissions = async () => {
+      // Use current warState from closure, but also get latest from state
+      const currentWar = warState;
+      if (!currentWar || !currentWar.active || currentWar.winner) {
         return;
       }
       
       try {
-        const updatedSubmissions = { ...warSubmissions };
+        // Start with existing submissions from warState
+        const updatedSubmissions = { ...(currentWar.submissions || {}) };
         let winner = null;
+        let hasUpdates = false;
         
         // Check each participant's recent submissions for the specific problem
-        const checks = warState.participants.map(async (username) => {
+        const checks = currentWar.participants.map(async (username) => {
           try {
-            const submission = await fetchWithRetry(`${API_BASE_URL}/${username}/submission?limit=50`);
+            const submission = await fetchWithRetry(`${API_BASE_URL}/${username}/submission?limit=100`);
             if (submission && Array.isArray(submission) && submission.length > 0) {
               // Find submissions for this specific problem after war start time
+              let foundMatch = false;
               for (const sub of submission) {
                 const submissionTime = parseInt(sub.timestamp || "0", 10) * 1000;
-                if (submissionTime >= warState.startTime) {
+                if (submissionTime >= currentWar.startTime) {
                   // Check if this submission is for our problem
                   // Try multiple ways to match the problem
                   const problemTitle = (sub.title || "").toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
-                  const problemSlug = warState.problemSlug.toLowerCase();
+                  const problemSlug = currentWar.problemSlug.toLowerCase();
                   const titleSlug = (sub.titleSlug || "").toLowerCase();
+                  const titleNormalized = (sub.title || "").toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, "-");
+                  const titleWords = (sub.title || "").toLowerCase().split(/\s+/);
+                  const slugWords = problemSlug.split("-");
                   
-                  // Match by slug, title slug, or title contains slug
-                  if (titleSlug === problemSlug || 
-                      problemTitle.includes(problemSlug) || 
-                      problemSlug.includes(problemTitle) ||
-                      (sub.title && sub.title.toLowerCase().includes(problemSlug.replace(/-/g, " ")))) {
-                    // Update submission status (keep the earliest one)
-                    if (!updatedSubmissions[username] || submissionTime < updatedSubmissions[username].time) {
+                  // More flexible matching - check if problem slug matches in various ways
+                  const slugMatch = titleSlug === problemSlug || 
+                                   problemTitle === problemSlug ||
+                                   problemTitle.includes(problemSlug) || 
+                                   problemSlug.includes(problemTitle) ||
+                                   titleNormalized.includes(problemSlug) ||
+                                   problemSlug.includes(titleNormalized) ||
+                                   (sub.title && sub.title.toLowerCase().includes(problemSlug.replace(/-/g, " "))) ||
+                                   (sub.titleSlug && sub.titleSlug.toLowerCase() === problemSlug) ||
+                                   (sub.title && slugWords.length > 0 && slugWords.every(word => word.length > 2 && sub.title.toLowerCase().includes(word))) ||
+                                   (sub.titleSlug && sub.titleSlug.toLowerCase().includes(problemSlug)) ||
+                                   (problemSlug && sub.titleSlug && sub.titleSlug.toLowerCase().includes(problemSlug.split("-")[0]));
+                  
+                  if (slugMatch) {
+                    foundMatch = true;
+                    const status = sub.statusDisplay || sub.status || sub.statusCode || "Unknown";
+                    // Always update if we don't have a submission, or if this is newer
+                    const existingSubmission = updatedSubmissions[username];
+                    if (!existingSubmission || submissionTime > existingSubmission.time) {
                       updatedSubmissions[username] = {
-                        status: sub.statusDisplay || sub.status || "Unknown",
+                        status: status,
                         time: submissionTime,
                         runtime: sub.runtime || "N/A",
                         memory: sub.memory || "N/A"
                       };
+                      hasUpdates = true;
                       
                       // Check if this is the first accepted submission
-                      if ((sub.statusDisplay === "Accepted" || sub.status === "Accepted") && !winner) {
+                      const isAccepted = status === "Accepted" || 
+                                        String(status).toLowerCase().includes("accepted") ||
+                                        String(status) === "10" || // LeetCode sometimes uses status codes
+                                        String(sub.statusCode) === "10";
+                      if (isAccepted && !winner) {
                         winner = username;
                       }
                     }
+                    // Break after finding first matching submission (most recent)
+                    break;
                   }
                 }
+              }
+              
+              // Debug: Log if we couldn't find a match (for troubleshooting)
+              if (!foundMatch && currentWar.problemSlug) {
+                console.log(`No match found for ${username} with problem slug: ${currentWar.problemSlug}`);
               }
             }
           } catch (e) {
@@ -828,16 +904,18 @@ export default function App() {
         
         await Promise.all(checks);
         
-        // Update submissions state
-        if (Object.keys(updatedSubmissions).length > 0) {
+        // Always update submissions state (even if no new ones found, sync existing ones)
+        // This ensures UI stays in sync with Firebase
+        const submissionsChanged = JSON.stringify(updatedSubmissions) !== JSON.stringify(currentWar.submissions || {});
+        if (hasUpdates || submissionsChanged || Object.keys(updatedSubmissions).length > 0) {
           setWarSubmissions(updatedSubmissions);
-          const updatedWar = { ...warState, submissions: updatedSubmissions };
+          const updatedWar = { ...currentWar, submissions: updatedSubmissions };
           if (winner) {
             updatedWar.active = false;
             updatedWar.winner = winner;
             await saveSharedRoom({ war: updatedWar });
             setWarState(updatedWar);
-            clearInterval(checkInterval);
+            if (checkInterval) clearInterval(checkInterval);
             playBeep();
             burstMicro(document.getElementById("burst-root"), 20);
           } else {
@@ -849,10 +927,16 @@ export default function App() {
       } catch (e) {
         console.error("Error checking for winner:", e);
       }
-    }, 10000); // Check every 10 seconds
+    };
     
-    return () => clearInterval(checkInterval);
-  }, [warState?.active, warState?.startTime, warState?.participants, warState?.problemSlug, warState?.winner, saveSharedRoom, fetchWithRetry, warSubmissions]);
+    // Run immediately, then set interval
+    checkSubmissions();
+    checkInterval = setInterval(checkSubmissions, 10000); // Check every 10 seconds
+    
+    return () => {
+      if (checkInterval) clearInterval(checkInterval);
+    };
+  }, [warState?.active, warState?.startTime, warState?.participants, warState?.problemSlug, warState?.winner, saveSharedRoom, fetchWithRetry]);
 
   // Timer effect
   useEffect(() => {
@@ -1471,21 +1555,25 @@ export default function App() {
                   <div className="war-submissions">
                     <div className="war-status" style={{ marginTop: 16, marginBottom: 8, fontWeight: 700 }}>Submission Status:</div>
                     {warState.participants.map(username => {
-                      const submission = warSubmissions[username] || warState.submissions?.[username];
+                      // Check both warSubmissions state and warState.submissions (prioritize warState.submissions as it's synced from Firebase)
+                      const submission = warState.submissions?.[username] || warSubmissions[username];
                       const getStatusClass = (status) => {
-                        if (!status) return "other";
-                        const s = status.toLowerCase();
-                        if (s.includes("accepted")) return "accepted";
-                        if (s.includes("wrong") || s.includes("error")) return "wrong";
-                        if (s.includes("time limit") || s.includes("tle")) return "tle";
-                        if (s.includes("runtime")) return "runtime";
+                        if (!status || status === "Unknown") return "other";
+                        const s = String(status).toLowerCase();
+                        if (s.includes("accepted") || s === "10") return "accepted";
+                        if (s.includes("wrong") || s.includes("error") || s.includes("wrong answer") || s === "11") return "wrong";
+                        if (s.includes("time limit") || s.includes("tle") || s.includes("time limit exceeded") || s === "12") return "tle";
+                        if (s.includes("runtime") || s.includes("runtime error") || s === "13") return "runtime";
+                        if (s.includes("compilation") || s.includes("compile") || s === "14") return "other";
                         return "other";
                       };
+                      const displayStatus = submission?.status || "Not submitted";
+                      const statusClass = getStatusClass(submission?.status);
                       return (
                         <div key={username} className="war-submission-item">
                           <div className="war-submission-user">{username}</div>
-                          <div className={`war-submission-status ${getStatusClass(submission?.status)}`}>
-                            {submission?.status || "Not submitted"}
+                          <div className={`war-submission-status ${statusClass}`}>
+                            {displayStatus === "Not submitted" ? displayStatus : (displayStatus === "Accepted" ? "✓ Accepted" : displayStatus)}
                           </div>
                         </div>
                       );
