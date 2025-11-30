@@ -324,8 +324,33 @@ export default function App() {
         setFriendUsernames(usernames);
         
         // Update war state (room-specific)
+        // Use functional update to merge with local state and avoid overwriting pending updates
         if (data?.war) {
-          setWarState(data.war);
+          setWarState(prevWar => {
+            // If we have a local war state and it's the same war, merge submissions
+            if (prevWar && prevWar.problemSlug === data.war.problemSlug && prevWar.startTime === data.war.startTime) {
+              // Merge: prefer local submissions if they're newer, otherwise use Firebase
+              const mergedSubmissions = { ...data.war.submissions };
+              if (prevWar.submissions) {
+                Object.keys(prevWar.submissions).forEach(username => {
+                  const localSub = prevWar.submissions[username];
+                  const firebaseSub = data.war.submissions?.[username];
+                  // Keep local if it's newer
+                  if (!firebaseSub || (localSub.time > firebaseSub.time)) {
+                    mergedSubmissions[username] = localSub;
+                  }
+                });
+              }
+              return {
+                ...data.war,
+                submissions: mergedSubmissions,
+                submissionCounts: data.war.submissionCounts || prevWar.submissionCounts || {}
+              };
+            }
+            // New war or different war, use Firebase data
+            return data.war;
+          });
+          
           // Update submissions if available (always sync from Firebase)
           if (data.war.submissions) {
             setWarSubmissions(data.war.submissions);
@@ -1134,6 +1159,13 @@ export default function App() {
     let checkInterval;
     let isRateLimited = false;
     let backoffTimeout = null;
+    const warStateRef = { current: warState }; // Ref to track latest warState
+    
+    // Update ref when warState changes
+    const updateRef = () => {
+      warStateRef.current = warState;
+    };
+    updateRef();
     
     const checkSubmissions = async () => {
       // Skip if rate limited - wait for backoff period
@@ -1142,8 +1174,8 @@ export default function App() {
         return;
       }
       
-      // Get latest warState from state (not closure) to avoid stale data
-      const currentWar = warState;
+      // Get latest warState from ref to avoid stale closure
+      const currentWar = warStateRef.current;
       if (!currentWar || !currentWar.active || currentWar.winner || !currentWar.problemSlug) {
         return;
       }
@@ -1303,27 +1335,41 @@ export default function App() {
         
         // Always update to ensure UI is in sync, even if no changes detected
         setWarSubmissions(updatedSubmissions);
-        const updatedWar = { 
-          ...currentWar, 
-          submissions: updatedSubmissions,
-          submissionCounts: updatedCounts
-        };
         
-        if (winner) {
-          console.log(`[War Check] 🎉 War ended! Winner: ${winner}`);
-          updatedWar.active = false;
-          updatedWar.winner = winner;
-          await saveSharedRoom({ war: updatedWar });
-          setWarState(updatedWar);
-          if (checkInterval) clearInterval(checkInterval);
-          playBeep();
-          burstMicro(document.getElementById("burst-root"), 20);
-        } else {
-          // Update submissions without ending war
-          await saveSharedRoom({ war: updatedWar });
-          setWarState(updatedWar);
-          console.log(`[War Check] War state updated in Firebase`);
-        }
+        // Use functional update to merge with latest state
+        setWarState(prevWar => {
+          if (!prevWar || prevWar.problemSlug !== currentWar.problemSlug) {
+            return prevWar; // Don't update if war changed
+          }
+          
+          const updatedWar = { 
+            ...prevWar, 
+            submissions: updatedSubmissions,
+            submissionCounts: updatedCounts
+          };
+          
+          if (winner) {
+            console.log(`[War Check] 🎉 War ended! Winner: ${winner}`);
+            updatedWar.active = false;
+            updatedWar.winner = winner;
+            // Save to Firebase and update state
+            saveSharedRoom({ war: updatedWar }).then(() => {
+              setWarState(updatedWar);
+              if (checkInterval) clearInterval(checkInterval);
+              playBeep();
+              burstMicro(document.getElementById("burst-root"), 20);
+            });
+            return updatedWar;
+          } else {
+            // Update submissions without ending war - save to Firebase
+            saveSharedRoom({ war: updatedWar }).then(() => {
+              console.log(`[War Check] War state updated in Firebase`);
+            });
+            // Update ref immediately
+            warStateRef.current = updatedWar;
+            return updatedWar;
+          }
+        });
       } catch (e) {
         console.error("Error checking for winner:", e);
       }
@@ -1342,11 +1388,15 @@ export default function App() {
       }
     }, 30 * 1000); // Check every 30 seconds initially
     
+    // Update ref when warState changes
+    const intervalId = setInterval(updateRef, 1000); // Update ref every second
+    
     return () => {
       if (checkInterval) clearInterval(checkInterval);
       if (backoffTimeout) clearTimeout(backoffTimeout);
+      clearInterval(intervalId);
     };
-  }, [warState?.active, warState?.startTime, warState?.participants, warState?.problemSlug, warState?.winner, saveSharedRoom, fetchWithRetry]);
+  }, [warState?.active, warState?.startTime, warState?.participants, warState?.problemSlug, warState?.winner, saveSharedRoom, fetchWithRetry, warState]);
 
   // Timer effect
   useEffect(() => {
