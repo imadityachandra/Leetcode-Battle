@@ -293,14 +293,14 @@ export default function App() {
     // Don't load room data if user hasn't joined yet (no username)
     const hasUsername = localStorage.getItem("lb_leetcodeUsername");
     if (!hasUsername) {
-      setFriendUsernames([]);
-      return;
-    }
+        setFriendUsernames([]);
+        return;
+      }
     
     const docRef = doc(db, SHARED_ROOM_PATH);
     const unsub = onSnapshot(docRef, async (snap) => {
       if (snap.exists()) {
-        const data = snap.data();
+      const data = snap.data();
         const currentUsername = localStorage.getItem("lb_leetcodeUsername");
         let usernames = [...(data?.usernames || [])];
         
@@ -1101,7 +1101,8 @@ export default function App() {
       duration: warDuration,
       winner: null,
       participants: friendUsernames,
-      submissions: {}
+      submissions: {},
+      submissionCounts: {} // Track total submission count per user
     };
     
     // Save to shared room (room-specific)
@@ -1150,6 +1151,7 @@ export default function App() {
       try {
         // Start with existing submissions from warState
         const updatedSubmissions = { ...(currentWar.submissions || {}) };
+        const updatedCounts = { ...(currentWar.submissionCounts || {}) };
         let winner = null;
         let hasUpdates = false;
         
@@ -1166,65 +1168,88 @@ export default function App() {
           try {
             const submission = await fetchWithRetry(`${API_BASE_URL}/${username}/submission?limit=10`);
             if (submission && Array.isArray(submission) && submission.length > 0) {
-              // Find the latest submission for this specific problem (no time filter)
-              let foundMatch = false;
+              // Find all submissions for this specific problem during the war
+              let submissionCount = 0;
+              let latestSubmission = null;
+              let latestTime = 0;
+              
               for (const sub of submission) {
                 const submissionTime = parseInt(sub.timestamp || "0", 10) * 1000;
-                // Check if this submission is for our problem (get latest, not filtered by start time)
-                  // Try multiple ways to match the problem
-                  const problemTitle = (sub.title || "").toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
-                  const problemSlug = currentWar.problemSlug.toLowerCase();
-                  const titleSlug = (sub.titleSlug || "").toLowerCase();
-                  const titleNormalized = (sub.title || "").toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, "-");
-                  const titleWords = (sub.title || "").toLowerCase().split(/\s+/);
-                  const slugWords = problemSlug.split("-");
+                
+                // Only count submissions made during the war
+                if (submissionTime < currentWar.startTime) {
+                  continue; // Skip submissions before war started
+                }
+                
+                // Try multiple ways to match the problem
+                const problemTitle = (sub.title || "").toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+                const problemSlug = currentWar.problemSlug.toLowerCase();
+                const titleSlug = (sub.titleSlug || "").toLowerCase();
+                const titleNormalized = (sub.title || "").toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, "-");
+                const titleWords = (sub.title || "").toLowerCase().split(/\s+/);
+                const slugWords = problemSlug.split("-");
+                
+                // More flexible matching - check if problem slug matches in various ways
+                const slugMatch = titleSlug === problemSlug || 
+                                 problemTitle === problemSlug ||
+                                 titleSlug.includes(problemSlug) ||
+                                 problemSlug.includes(titleSlug) ||
+                                 problemTitle.includes(problemSlug) || 
+                                 problemSlug.includes(problemTitle) ||
+                                 titleNormalized.includes(problemSlug) ||
+                                 problemSlug.includes(titleNormalized) ||
+                                 (sub.title && sub.title.toLowerCase().includes(problemSlug.replace(/-/g, " "))) ||
+                                 (sub.titleSlug && sub.titleSlug.toLowerCase() === problemSlug) ||
+                                 (sub.title && slugWords.length > 0 && slugWords.every(word => word.length > 2 && sub.title.toLowerCase().includes(word))) ||
+                                 (sub.titleSlug && sub.titleSlug.toLowerCase().includes(problemSlug)) ||
+                                 (problemSlug && sub.titleSlug && sub.titleSlug.toLowerCase().includes(problemSlug.split("-")[0]));
+                
+                if (slugMatch) {
+                  submissionCount++;
                   
-                  // More flexible matching - check if problem slug matches in various ways
-                  const slugMatch = titleSlug === problemSlug || 
-                                   problemTitle === problemSlug ||
-                                   problemTitle.includes(problemSlug) || 
-                                   problemSlug.includes(problemTitle) ||
-                                   titleNormalized.includes(problemSlug) ||
-                                   problemSlug.includes(titleNormalized) ||
-                                   (sub.title && sub.title.toLowerCase().includes(problemSlug.replace(/-/g, " "))) ||
-                                   (sub.titleSlug && sub.titleSlug.toLowerCase() === problemSlug) ||
-                                   (sub.title && slugWords.length > 0 && slugWords.every(word => word.length > 2 && sub.title.toLowerCase().includes(word))) ||
-                                   (sub.titleSlug && sub.titleSlug.toLowerCase().includes(problemSlug)) ||
-                                   (problemSlug && sub.titleSlug && sub.titleSlug.toLowerCase().includes(problemSlug.split("-")[0]));
-                  
-                  if (slugMatch) {
-                    foundMatch = true;
-                    const status = sub.statusDisplay || sub.status || sub.statusCode || "Unknown";
-                    // Always update if we don't have a submission, or if this is newer
-                    const existingSubmission = updatedSubmissions[username];
-                    if (!existingSubmission || submissionTime > existingSubmission.time) {
-                      updatedSubmissions[username] = {
-                        status: status,
-                        time: submissionTime,
-                        runtime: sub.runtime || "N/A",
-                        memory: sub.memory || "N/A"
-                      };
-                      hasUpdates = true;
-                      
-                      // Check if this is the first accepted submission
-                      const isAccepted = status === "Accepted" || 
-                                        String(status).toLowerCase().includes("accepted") ||
-                                        String(status) === "10" || // LeetCode sometimes uses status codes
-                                        String(sub.statusCode) === "10";
-                      if (isAccepted && !winner) {
-                        winner = username;
-                      }
-                    }
-                    // Break after finding first matching submission (most recent)
-                    break;
+                  // Track the latest submission
+                  if (submissionTime > latestTime) {
+                    latestTime = submissionTime;
+                    latestSubmission = sub;
                   }
                 }
               }
               
-              // Debug: Log if we couldn't find a match (for troubleshooting)
-              if (!foundMatch && currentWar.problemSlug) {
-                console.log(`No match found for ${username} with problem slug: ${currentWar.problemSlug}`);
+              // Update submission count
+              if (submissionCount > 0) {
+                updatedCounts[username] = submissionCount;
+                hasUpdates = true;
               }
+              
+              // Update latest submission status
+              if (latestSubmission) {
+                const status = latestSubmission.statusDisplay || latestSubmission.status || latestSubmission.statusCode || "Unknown";
+                const existingSubmission = updatedSubmissions[username];
+                
+                // Always update if we don't have a submission, or if this is newer
+                if (!existingSubmission || latestTime > existingSubmission.time) {
+                  updatedSubmissions[username] = {
+                    status: status,
+                    time: latestTime,
+                    runtime: latestSubmission.runtime || "N/A",
+                    memory: latestSubmission.memory || "N/A"
+                  };
+                  hasUpdates = true;
+                  
+                  // Check if this is the first accepted submission
+                  const isAccepted = status === "Accepted" || 
+                                    String(status).toLowerCase().includes("accepted") ||
+                                    String(status) === "10" || // LeetCode sometimes uses status codes
+                                    String(latestSubmission.statusCode) === "10";
+                  if (isAccepted && !winner) {
+                    winner = username;
+                  }
+                }
+              } else if (currentWar.problemSlug) {
+                // Debug: Log if we couldn't find a match (for troubleshooting)
+                console.log(`No match found for ${username} with problem slug: ${currentWar.problemSlug} during war (started at ${new Date(currentWar.startTime).toISOString()})`);
+              }
+            }
           } catch (e) {
             // Handle rate limit errors with backoff
             if (e.message === "Rate limited" || e.message?.includes("429")) {
@@ -1254,9 +1279,15 @@ export default function App() {
         // Always update submissions state (even if no new ones found, sync existing ones)
         // This ensures UI stays in sync with Firebase
         const submissionsChanged = JSON.stringify(updatedSubmissions) !== JSON.stringify(currentWar.submissions || {});
-        if (hasUpdates || submissionsChanged || Object.keys(updatedSubmissions).length > 0) {
+        const countsChanged = JSON.stringify(updatedCounts) !== JSON.stringify(currentWar.submissionCounts || {});
+        
+        if (hasUpdates || submissionsChanged || countsChanged || Object.keys(updatedSubmissions).length > 0) {
           setWarSubmissions(updatedSubmissions);
-          const updatedWar = { ...currentWar, submissions: updatedSubmissions };
+          const updatedWar = { 
+            ...currentWar, 
+            submissions: updatedSubmissions,
+            submissionCounts: updatedCounts
+          };
           if (winner) {
             updatedWar.active = false;
             updatedWar.winner = winner;
@@ -1976,6 +2007,7 @@ export default function App() {
                     {warState.participants.map(username => {
                       // Check both warSubmissions state and warState.submissions (prioritize warState.submissions as it's synced from Firebase)
                       const submission = warState.submissions?.[username] || warSubmissions[username];
+                      const submissionCount = warState.submissionCounts?.[username] || 0;
                       const getStatusClass = (status) => {
                         if (!status || status === "Unknown") return "other";
                         const s = String(status).toLowerCase();
@@ -1990,7 +2022,14 @@ export default function App() {
                       const statusClass = getStatusClass(submission?.status);
                       return (
                         <div key={username} className="war-submission-item">
-                          <div className="war-submission-user">{username}</div>
+                          <div className="war-submission-user">
+                            {username}
+                            {submissionCount > 0 && (
+                              <span style={{ fontSize: "11px", color: "var(--muted)", marginLeft: "8px", fontWeight: 500 }}>
+                                ({submissionCount} {submissionCount === 1 ? "attempt" : "attempts"})
+                              </span>
+                            )}
+                          </div>
                           <div className={`war-submission-status ${statusClass}`}>
                             {displayStatus === "Not submitted" ? displayStatus : (displayStatus === "Accepted" ? "✓ Accepted" : displayStatus)}
                           </div>
