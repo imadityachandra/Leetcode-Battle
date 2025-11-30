@@ -1142,11 +1142,13 @@ export default function App() {
         return;
       }
       
-      // Use current warState from closure, but also get latest from state
+      // Get latest warState from state (not closure) to avoid stale data
       const currentWar = warState;
-      if (!currentWar || !currentWar.active || currentWar.winner) {
+      if (!currentWar || !currentWar.active || currentWar.winner || !currentWar.problemSlug) {
         return;
       }
+      
+      console.log(`[War Check] Checking submissions for problem: ${currentWar.problemSlug}, started at: ${new Date(currentWar.startTime).toISOString()}`);
       
       try {
         // Start with existing submissions from warState
@@ -1168,6 +1170,8 @@ export default function App() {
           try {
             const submission = await fetchWithRetry(`${API_BASE_URL}/${username}/submission?limit=10`);
             if (submission && Array.isArray(submission) && submission.length > 0) {
+              console.log(`[War Check] Fetched ${submission.length} submissions for ${username}`);
+              
               // Find all submissions for this specific problem during the war
               let submissionCount = 0;
               let latestSubmission = null;
@@ -1175,6 +1179,11 @@ export default function App() {
               
               for (const sub of submission) {
                 const submissionTime = parseInt(sub.timestamp || "0", 10) * 1000;
+                
+                // Debug: Log submission details
+                if (submissionTime >= currentWar.startTime) {
+                  console.log(`[War Check] ${username} submission at ${new Date(submissionTime).toISOString()}: ${sub.title || sub.titleSlug || "Unknown"} - Status: ${sub.statusDisplay || sub.status || sub.statusCode}`);
+                }
                 
                 // Only count submissions made during the war
                 if (submissionTime < currentWar.startTime) {
@@ -1206,6 +1215,7 @@ export default function App() {
                 
                 if (slugMatch) {
                   submissionCount++;
+                  console.log(`[War Check] ✓ Match found for ${username}: ${sub.title || sub.titleSlug} - Status: ${sub.statusDisplay || sub.status || sub.statusCode}`);
                   
                   // Track the latest submission
                   if (submissionTime > latestTime) {
@@ -1219,6 +1229,7 @@ export default function App() {
               if (submissionCount > 0) {
                 updatedCounts[username] = submissionCount;
                 hasUpdates = true;
+                console.log(`[War Check] ${username} has ${submissionCount} submission(s) during war`);
               }
               
               // Update latest submission status
@@ -1228,6 +1239,7 @@ export default function App() {
                 
                 // Always update if we don't have a submission, or if this is newer
                 if (!existingSubmission || latestTime > existingSubmission.time) {
+                  console.log(`[War Check] Updating ${username} status: ${status} (time: ${new Date(latestTime).toISOString()})`);
                   updatedSubmissions[username] = {
                     status: status,
                     time: latestTime,
@@ -1242,12 +1254,16 @@ export default function App() {
                                     String(status) === "10" || // LeetCode sometimes uses status codes
                                     String(latestSubmission.statusCode) === "10";
                   if (isAccepted && !winner) {
+                    console.log(`[War Check] 🏆 Winner found: ${username} with Accepted submission!`);
                     winner = username;
                   }
+                } else {
+                  console.log(`[War Check] ${username} submission not newer (existing: ${new Date(existingSubmission.time).toISOString()}, new: ${new Date(latestTime).toISOString()})`);
                 }
               } else if (currentWar.problemSlug) {
                 // Debug: Log if we couldn't find a match (for troubleshooting)
-                console.log(`No match found for ${username} with problem slug: ${currentWar.problemSlug} during war (started at ${new Date(currentWar.startTime).toISOString()})`);
+                console.log(`[War Check] ⚠️ No match found for ${username} with problem slug: ${currentWar.problemSlug} during war (started at ${new Date(currentWar.startTime).toISOString()})`);
+                console.log(`[War Check] Available submissions:`, submission.slice(0, 3).map(s => ({ title: s.title, titleSlug: s.titleSlug, time: new Date(parseInt(s.timestamp || "0", 10) * 1000).toISOString() })));
               }
             }
           } catch (e) {
@@ -1281,35 +1297,50 @@ export default function App() {
         const submissionsChanged = JSON.stringify(updatedSubmissions) !== JSON.stringify(currentWar.submissions || {});
         const countsChanged = JSON.stringify(updatedCounts) !== JSON.stringify(currentWar.submissionCounts || {});
         
-        if (hasUpdates || submissionsChanged || countsChanged || Object.keys(updatedSubmissions).length > 0) {
-          setWarSubmissions(updatedSubmissions);
-          const updatedWar = { 
-            ...currentWar, 
-            submissions: updatedSubmissions,
-            submissionCounts: updatedCounts
-          };
-          if (winner) {
-            updatedWar.active = false;
-            updatedWar.winner = winner;
-            await saveSharedRoom({ war: updatedWar });
-            setWarState(updatedWar);
-            if (checkInterval) clearInterval(checkInterval);
-            playBeep();
-            burstMicro(document.getElementById("burst-root"), 20);
-          } else {
-            // Update submissions without ending war
-            await saveSharedRoom({ war: updatedWar });
-            setWarState(updatedWar);
-          }
+        console.log(`[War Check] hasUpdates: ${hasUpdates}, submissionsChanged: ${submissionsChanged}, countsChanged: ${countsChanged}`);
+        console.log(`[War Check] Updated submissions:`, updatedSubmissions);
+        console.log(`[War Check] Updated counts:`, updatedCounts);
+        
+        // Always update to ensure UI is in sync, even if no changes detected
+        setWarSubmissions(updatedSubmissions);
+        const updatedWar = { 
+          ...currentWar, 
+          submissions: updatedSubmissions,
+          submissionCounts: updatedCounts
+        };
+        
+        if (winner) {
+          console.log(`[War Check] 🎉 War ended! Winner: ${winner}`);
+          updatedWar.active = false;
+          updatedWar.winner = winner;
+          await saveSharedRoom({ war: updatedWar });
+          setWarState(updatedWar);
+          if (checkInterval) clearInterval(checkInterval);
+          playBeep();
+          burstMicro(document.getElementById("burst-root"), 20);
+        } else {
+          // Update submissions without ending war
+          await saveSharedRoom({ war: updatedWar });
+          setWarState(updatedWar);
+          console.log(`[War Check] War state updated in Firebase`);
         }
       } catch (e) {
         console.error("Error checking for winner:", e);
       }
     };
     
-    // Run immediately, then set interval (much longer interval to avoid rate limits)
+    // Run immediately, then set interval
     checkSubmissions();
-    checkInterval = setInterval(checkSubmissions, 2 * 60 * 1000); // Check every 2 minutes
+    // Check more frequently initially (every 30 seconds for first 5 minutes, then every 2 minutes)
+    let checkCount = 0;
+    checkInterval = setInterval(() => {
+      checkCount++;
+      checkSubmissions();
+      if (checkCount >= 10) { // After 10 checks (5 minutes), switch to longer interval
+        clearInterval(checkInterval);
+        checkInterval = setInterval(checkSubmissions, 2 * 60 * 1000); // Check every 2 minutes
+      }
+    }, 30 * 1000); // Check every 30 seconds initially
     
     return () => {
       if (checkInterval) clearInterval(checkInterval);
