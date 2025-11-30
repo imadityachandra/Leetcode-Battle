@@ -113,6 +113,18 @@ export default function App() {
   const [linkCopied, setLinkCopied] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
   
+  // Initial setup state
+  const [showInitialSetup, setShowInitialSetup] = useState(() => {
+    const hasUsername = localStorage.getItem("lb_leetcodeUsername");
+    const hasRoom = localStorage.getItem("lb_currentRoom") && localStorage.getItem("lb_currentRoom") !== "default";
+    return !hasUsername || !hasRoom;
+  });
+  const [initialLeetCodeUsername, setInitialLeetCodeUsername] = useState(() => localStorage.getItem("lb_leetcodeUsername") || "");
+  const [initialRoomName, setInitialRoomName] = useState("");
+  const [showJoinModal, setShowJoinModal] = useState(false);
+  const [joinLeetCodeUsername, setJoinLeetCodeUsername] = useState("");
+  const [currentLeetCodeUsername, setCurrentLeetCodeUsername] = useState(() => localStorage.getItem("lb_leetcodeUsername") || "");
+  
   // War state
   const [warState, setWarState] = useState(null); // { active: bool, problemLink: string, problemSlug: string, startTime: number, duration: number, winner: string, submissions: {} }
   const [warTimer, setWarTimer] = useState(0); // seconds remaining
@@ -218,6 +230,11 @@ export default function App() {
     }
   }, [db, SHARED_ROOM_PATH, currentRoomId]);
 
+  // Normalize room name to ID (lowercase, replace spaces with underscores, remove special chars)
+  const normalizeRoomName = useCallback((name) => {
+    return name.toLowerCase().trim().replace(/\s+/g, "_").replace(/[^a-z0-9_]/g, "");
+  }, []);
+
   // Fetch shared room from Firebase
   const fetchSharedRoom = useCallback(async (roomId) => {
     if (!db) return null;
@@ -235,6 +252,13 @@ export default function App() {
       return null;
     }
   }, [db]);
+
+  // Check if room exists by name in Firebase
+  const checkRoomExistsByName = useCallback(async (roomName) => {
+    if (!db) return null;
+    const normalizedId = normalizeRoomName(roomName);
+    return await fetchSharedRoom(normalizedId);
+  }, [db, normalizeRoomName, fetchSharedRoom]);
 
   // Load user's local rooms list from Firebase (for UI)
   useEffect(() => {
@@ -534,6 +558,13 @@ export default function App() {
     const params = new URLSearchParams(window.location.search);
     const roomId = params.get("room");
     if (roomId && db) {
+      // Check if user has entered their LeetCode username
+      const hasUsername = localStorage.getItem("lb_leetcodeUsername");
+      if (!hasUsername) {
+        // Show join modal to enter username
+        setShowJoinModal(true);
+        return;
+      }
       // Always fetch from Firebase to ensure we have the latest room data
       // This ensures default room and other rooms are properly synced
       fetchSharedRoom(roomId).then(sharedRoom => {
@@ -637,17 +668,62 @@ export default function App() {
   /* ---------------------------
      Room management functions
      --------------------------- */
-  const createRoom = async () => {
-    const name = newRoomName.trim() || `Room ${rooms.length + 1}`;
-    if (rooms.some(r => r.name.toLowerCase() === name.toLowerCase())) {
-      setError(`Room "${name}" already exists`);
+  const createRoom = async (roomName = null, leetcodeUsername = null) => {
+    const name = (roomName || newRoomName).trim();
+    if (!name) {
+      setError("Room name is required");
       setTimeout(() => setError(null), 2200);
       return;
     }
+    
+    // Use provided username or current LeetCode username
+    const username = leetcodeUsername || currentLeetCodeUsername;
+    
+    // Normalize room name to create unique ID
+    const normalizedId = normalizeRoomName(name);
+    
+    // Check if room already exists in Firebase
+    const existingRoom = await checkRoomExistsByName(name);
+    if (existingRoom) {
+      // Room exists - join it instead
+      setRooms(prev => {
+        const exists = prev.some(r => r.id === normalizedId);
+        if (!exists) {
+          const newRooms = [...prev, {
+            id: normalizedId,
+            name: existingRoom.name || name,
+            usernames: existingRoom.usernames || []
+          }];
+          saveUserRooms(newRooms);
+          return newRooms;
+        }
+        return prev;
+      });
+      setCurrentRoomId(normalizedId);
+      // Add username to room if provided
+      if (username) {
+        const updatedUsernames = [...(existingRoom.usernames || [])];
+        if (!updatedUsernames.includes(username)) {
+          updatedUsernames.push(username);
+          await saveSharedRoom({
+            id: normalizedId,
+            name: existingRoom.name || name,
+            usernames: updatedUsernames
+          });
+          setFriendUsernames(updatedUsernames);
+        }
+      }
+      setNewRoomName("");
+      setShowRoomModal(false);
+      playBeep();
+      return;
+    }
+    
+    // Create new room
     const newRoom = {
-      id: `room_${Date.now()}`,
+      id: normalizedId,
       name,
-      usernames: []
+      usernames: username ? [username] : []
     };
     // Save to shared collection first (with explicit name and usernames)
     await saveSharedRoom({ 
@@ -659,9 +735,104 @@ export default function App() {
     const updatedRooms = [...rooms, newRoom];
     await saveUserRooms(updatedRooms);
     setCurrentRoomId(newRoom.id);
+    if (username) {
+      setFriendUsernames([username]);
+    }
     setNewRoomName("");
     setShowRoomModal(false);
     playBeep();
+  };
+
+  // Initial setup handler
+  const handleInitialSetup = async () => {
+    const username = initialLeetCodeUsername.trim();
+    const roomName = initialRoomName.trim();
+    
+    if (!username) {
+      setError("LeetCode username is required");
+      setTimeout(() => setError(null), 2200);
+      return;
+    }
+    if (!roomName) {
+      setError("Room name is required");
+      setTimeout(() => setError(null), 2200);
+      return;
+    }
+    
+    // Save username to localStorage
+    localStorage.setItem("lb_leetcodeUsername", username);
+    setCurrentLeetCodeUsername(username);
+    
+    // Create or join room
+    await createRoom(roomName, username);
+    
+    // Close setup modal
+    setShowInitialSetup(false);
+    setAppStatus("Ready to battle");
+  };
+
+  // Join room handler (when joining via link)
+  const handleJoinRoom = async () => {
+    const username = joinLeetCodeUsername.trim();
+    
+    if (!username) {
+      setError("LeetCode username is required");
+      setTimeout(() => setError(null), 2200);
+      return;
+    }
+    
+    // Save username to localStorage
+    localStorage.setItem("lb_leetcodeUsername", username);
+    setCurrentLeetCodeUsername(username);
+    
+    // Get room from URL
+    const params = new URLSearchParams(window.location.search);
+    const roomId = params.get("room");
+    
+    if (roomId && db) {
+      const sharedRoom = await fetchSharedRoom(roomId);
+      if (sharedRoom) {
+        // Add username to room
+        const updatedUsernames = [...(sharedRoom.usernames || [])];
+        if (!updatedUsernames.includes(username)) {
+          updatedUsernames.push(username);
+          await saveSharedRoom({
+            id: roomId,
+            name: sharedRoom.name,
+            usernames: updatedUsernames
+          });
+        }
+        
+        // Update local state
+        setRooms(prev => {
+          const exists = prev.some(r => r.id === roomId);
+          if (!exists) {
+            const newRooms = [...prev, {
+              id: roomId,
+              name: sharedRoom.name || `Room ${roomId.substring(0, 8)}`,
+              usernames: updatedUsernames
+            }];
+            saveUserRooms(newRooms);
+            return newRooms;
+          } else {
+            const updated = prev.map(r => 
+              r.id === roomId 
+                ? { ...r, name: sharedRoom.name || r.name, usernames: updatedUsernames }
+                : r
+            );
+            saveUserRooms(updated);
+            return updated;
+          }
+        });
+        setFriendUsernames(updatedUsernames);
+        setCurrentRoomId(roomId);
+        setShowJoinModal(false);
+        setAppStatus("Joined room!");
+        // Clean URL
+        window.history.replaceState({}, "", window.location.pathname);
+        playBeep();
+      }
+    }
   };
 
   const deleteRoom = (roomId) => {
@@ -858,12 +1029,11 @@ export default function App() {
           try {
             const submission = await fetchWithRetry(`${API_BASE_URL}/${username}/submission?limit=10`);
             if (submission && Array.isArray(submission) && submission.length > 0) {
-              // Find submissions for this specific problem after war start time
+              // Find the latest submission for this specific problem (no time filter)
               let foundMatch = false;
               for (const sub of submission) {
                 const submissionTime = parseInt(sub.timestamp || "0", 10) * 1000;
-                if (submissionTime >= currentWar.startTime) {
-                  // Check if this submission is for our problem
+                // Check if this submission is for our problem (get latest, not filtered by start time)
                   // Try multiple ways to match the problem
                   const problemTitle = (sub.title || "").toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
                   const problemSlug = currentWar.problemSlug.toLowerCase();
@@ -918,7 +1088,6 @@ export default function App() {
               if (!foundMatch && currentWar.problemSlug) {
                 console.log(`No match found for ${username} with problem slug: ${currentWar.problemSlug}`);
               }
-            }
           } catch (e) {
             // Handle rate limit errors with backoff
             if (e.message === "Rate limited" || e.message?.includes("429")) {
@@ -1355,6 +1524,16 @@ export default function App() {
         .room-header-btn { display:flex; align-items:center; gap:8px; padding:8px 12px; border-radius:10px; border:1px solid var(--border); background:var(--card); color:var(--text); cursor:pointer; font-weight:600; font-size:14px; transition: all 0.2s ease; }
         .room-header-btn:hover { opacity:0.8; transform: translateY(-1px); }
 
+        /* modals */
+        .modal-overlay { position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:1000; }
+        .modal-content { background:var(--card); border:1px solid var(--border); border-radius:16px; padding:24px; max-width:400px; width:90%; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
+        .modal-title { font-size:20px; font-weight:800; margin-bottom:16px; }
+        .modal-input { width:100%; padding:12px; border-radius:8px; border:1px solid var(--border); background:var(--card); color:var(--text); font-size:14px; margin-bottom:12px; }
+        .modal-actions { display:flex; gap:12px; margin-top:20px; }
+        .modal-btn { flex:1; padding:12px; border-radius:8px; border:0; font-weight:700; cursor:pointer; }
+        .modal-btn-primary { background:linear-gradient(90deg,#06b6d4,#7c3aed); color:white; }
+        .modal-btn-secondary { background:var(--card); color:var(--text); border:1px solid var(--border); }
+
         /* responsive tweaks */
         @media(max-width: 640px) {
           .header { flex-direction:column; align-items:flex-start; gap:10px; }
@@ -1367,6 +1546,67 @@ export default function App() {
           .footer-top button { width: 100%; justify-content: center; }
         }
       `}</style>
+
+      {/* Initial Setup Modal */}
+      {showInitialSetup && (
+        <div className="modal-overlay">
+          <div className="modal-content">
+            <div className="modal-title">Welcome to LeetCode Battle!</div>
+            <p style={{ marginBottom: "16px", color: "var(--muted)" }}>
+              Enter your LeetCode username and create or join a room to get started.
+            </p>
+            <input
+              type="text"
+              className="modal-input"
+              placeholder="Your LeetCode Username"
+              value={initialLeetCodeUsername}
+              onChange={(e) => setInitialLeetCodeUsername(e.target.value)}
+              onKeyPress={(e) => e.key === "Enter" && handleInitialSetup()}
+            />
+            <input
+              type="text"
+              className="modal-input"
+              placeholder="Room Name"
+              value={initialRoomName}
+              onChange={(e) => setInitialRoomName(e.target.value)}
+              onKeyPress={(e) => e.key === "Enter" && handleInitialSetup()}
+            />
+            <div className="modal-actions">
+              <button className="modal-btn modal-btn-primary" onClick={handleInitialSetup}>
+                Start Battle
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Join Room Modal */}
+      {showJoinModal && (
+        <div className="modal-overlay">
+          <div className="modal-content">
+            <div className="modal-title">Join Room</div>
+            <p style={{ marginBottom: "16px", color: "var(--muted)" }}>
+              Enter your LeetCode username to join this room.
+            </p>
+            <input
+              type="text"
+              className="modal-input"
+              placeholder="Your LeetCode Username"
+              value={joinLeetCodeUsername}
+              onChange={(e) => setJoinLeetCodeUsername(e.target.value)}
+              onKeyPress={(e) => e.key === "Enter" && handleJoinRoom()}
+            />
+            <div className="modal-actions">
+              <button className="modal-btn modal-btn-primary" onClick={handleJoinRoom}>
+                Join
+              </button>
+              <button className="modal-btn modal-btn-secondary" onClick={() => setShowJoinModal(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="container">
         {/* header */}
