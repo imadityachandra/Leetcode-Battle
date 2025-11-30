@@ -573,7 +573,7 @@ export default function App() {
       
       // Always fetch from Firebase to ensure we have the latest room data
       // This ensures default room and other rooms are properly synced
-      fetchSharedRoom(roomId).then(sharedRoom => {
+      fetchSharedRoom(roomId).then(async (sharedRoom) => {
         if (sharedRoom) {
           // Room exists in Firebase - update user's local list with latest data
           const currentUsername = localStorage.getItem("lb_leetcodeUsername");
@@ -582,12 +582,15 @@ export default function App() {
           // Add current user to room if they have a username and aren't already in the room
           if (currentUsername && !updatedUsernames.includes(currentUsername)) {
             updatedUsernames.push(currentUsername);
-            // Update Firebase with new username
-            saveSharedRoom({
+            // Update Firebase with new username directly
+            const roomPath = typeof __app_id !== "undefined"
+              ? `/artifacts/${appId}/rooms/${roomId}`
+              : `rooms/${roomId}`;
+            await setDoc(doc(db, roomPath), {
               id: roomId,
               name: sharedRoom.name || (roomId === "default" ? "Default Room" : `Room ${roomId.substring(0, 8)}`),
               usernames: updatedUsernames
-            });
+            }, { merge: true });
           }
           
           setRooms(prev => {
@@ -708,10 +711,41 @@ export default function App() {
       r.id === normalizedId || r.name.toLowerCase() === name.toLowerCase()
     );
     if (localDuplicate) {
-      setError(`Room "${name}" already exists`);
-      setTimeout(() => setError(null), 2200);
-      // Switch to existing room instead
+      // Switch to existing room instead of creating duplicate
       setCurrentRoomId(localDuplicate.id);
+      // Add username if provided and not already in room
+      if (username && localDuplicate.usernames && !localDuplicate.usernames.includes(username)) {
+        const updatedUsernames = [...localDuplicate.usernames, username];
+        // Update Firebase
+        const roomPath = typeof __app_id !== "undefined"
+          ? `/artifacts/${appId}/rooms/${normalizedId}`
+          : `rooms/${normalizedId}`;
+        await setDoc(doc(db, roomPath), {
+          id: normalizedId,
+          name: localDuplicate.name,
+          usernames: updatedUsernames
+        }, { merge: true });
+        // Update local state
+        setRooms(prev => prev.map(r => 
+          r.id === normalizedId ? { ...r, usernames: updatedUsernames } : r
+        ));
+        setFriendUsernames(updatedUsernames);
+      } else if (username && !localDuplicate.usernames) {
+        // Room exists but has no usernames yet
+        const updatedUsernames = [username];
+        const roomPath = typeof __app_id !== "undefined"
+          ? `/artifacts/${appId}/rooms/${normalizedId}`
+          : `rooms/${normalizedId}`;
+        await setDoc(doc(db, roomPath), {
+          id: normalizedId,
+          name: localDuplicate.name,
+          usernames: updatedUsernames
+        }, { merge: true });
+        setRooms(prev => prev.map(r => 
+          r.id === normalizedId ? { ...r, usernames: updatedUsernames } : r
+        ));
+        setFriendUsernames(updatedUsernames);
+      }
       setNewRoomName("");
       setShowRoomModal(false);
       playBeep();
@@ -721,7 +755,7 @@ export default function App() {
     // Check if room already exists in Firebase
     const existingRoom = await checkRoomExistsByName(name);
     if (existingRoom) {
-      // Room exists - join it instead
+      // Room exists in Firebase - join it instead
       setRooms(prev => {
         const exists = prev.some(r => r.id === normalizedId);
         if (!exists) {
@@ -741,11 +775,17 @@ export default function App() {
         const updatedUsernames = [...(existingRoom.usernames || [])];
         if (!updatedUsernames.includes(username)) {
           updatedUsernames.push(username);
-          await saveSharedRoom({
+          // Save to Firebase directly
+          const roomPath = typeof __app_id !== "undefined"
+            ? `/artifacts/${appId}/rooms/${normalizedId}`
+            : `rooms/${normalizedId}`;
+          await setDoc(doc(db, roomPath), {
             id: normalizedId,
             name: existingRoom.name || name,
             usernames: updatedUsernames
-          });
+          }, { merge: true });
+          setFriendUsernames(updatedUsernames);
+        } else {
           setFriendUsernames(updatedUsernames);
         }
       }
@@ -839,12 +879,17 @@ export default function App() {
         const updatedUsernames = [...(sharedRoom.usernames || [])];
         if (!updatedUsernames.includes(username)) {
           updatedUsernames.push(username);
-          await saveSharedRoom({
-            id: roomId,
-            name: sharedRoom.name || `Room ${roomId.substring(0, 8)}`,
-            usernames: updatedUsernames
-          });
         }
+        
+        // Save to Firebase with updated usernames directly
+        const roomPath = typeof __app_id !== "undefined"
+          ? `/artifacts/${appId}/rooms/${roomId}`
+          : `rooms/${roomId}`;
+        await setDoc(doc(db, roomPath), {
+          id: roomId,
+          name: sharedRoom.name || `Room ${roomId.substring(0, 8)}`,
+          usernames: updatedUsernames
+        }, { merge: true });
         
         // Update local state
         setRooms(prev => {
@@ -867,10 +912,13 @@ export default function App() {
             return updated;
           }
         });
+        
+        // Update state - this will trigger the shared room snapshot to sync
         setFriendUsernames(updatedUsernames);
         setCurrentRoomId(roomId);
         setShowJoinModal(false);
         setAppStatus("Joined room!");
+        
         // Clean URL
         window.history.replaceState({}, "", window.location.pathname);
         playBeep();
@@ -883,6 +931,7 @@ export default function App() {
       console.error("Error joining room:", e);
       setError("Failed to join room");
       setTimeout(() => setError(null), 2200);
+      setShowJoinModal(false);
     }
   };
 
