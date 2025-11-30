@@ -561,15 +561,35 @@ export default function App() {
       // Check if user has entered their LeetCode username
       const hasUsername = localStorage.getItem("lb_leetcodeUsername");
       if (!hasUsername) {
-        // Show join modal to enter username
+        // Show join modal to enter username - don't process room until username is entered
         setShowJoinModal(true);
         return;
       }
+      
+      // If join modal is showing, don't process room yet (wait for handleJoinRoom)
+      if (showJoinModal) {
+        return;
+      }
+      
       // Always fetch from Firebase to ensure we have the latest room data
       // This ensures default room and other rooms are properly synced
       fetchSharedRoom(roomId).then(sharedRoom => {
         if (sharedRoom) {
           // Room exists in Firebase - update user's local list with latest data
+          const currentUsername = localStorage.getItem("lb_leetcodeUsername");
+          let updatedUsernames = [...(sharedRoom.usernames || [])];
+          
+          // Add current user to room if they have a username and aren't already in the room
+          if (currentUsername && !updatedUsernames.includes(currentUsername)) {
+            updatedUsernames.push(currentUsername);
+            // Update Firebase with new username
+            saveSharedRoom({
+              id: roomId,
+              name: sharedRoom.name || (roomId === "default" ? "Default Room" : `Room ${roomId.substring(0, 8)}`),
+              usernames: updatedUsernames
+            });
+          }
+          
           setRooms(prev => {
             const exists = prev.some(r => r.id === roomId);
             if (!exists) {
@@ -577,7 +597,7 @@ export default function App() {
               const newRooms = [...prev, {
                 id: sharedRoom.id,
                 name: sharedRoom.name || (roomId === "default" ? "Default Room" : `Room ${roomId.substring(0, 8)}`),
-                usernames: sharedRoom.usernames || []
+                usernames: updatedUsernames
               }];
               saveUserRooms(newRooms);
               return newRooms;
@@ -588,7 +608,7 @@ export default function App() {
                   ? {
                       ...r,
                       name: sharedRoom.name || r.name || (roomId === "default" ? "Default Room" : `Room ${roomId.substring(0, 8)}`),
-                      usernames: sharedRoom.usernames || []
+                      usernames: updatedUsernames
                     }
                   : r
               );
@@ -597,7 +617,7 @@ export default function App() {
             }
           });
           // Update friend usernames immediately from shared room
-          setFriendUsernames(sharedRoom.usernames || []);
+          setFriendUsernames(updatedUsernames);
           setCurrentRoomId(roomId);
           setAppStatus("Joined room!");
           // Clean URL after joining
@@ -605,10 +625,11 @@ export default function App() {
           window.history.replaceState({}, "", newUrl);
         } else {
           // Room doesn't exist in Firebase - create it
+          const currentUsername = localStorage.getItem("lb_leetcodeUsername");
           const newRoom = {
             id: roomId,
             name: roomId === "default" ? "Default Room" : `Room ${roomId.substring(0, 8)}`,
-            usernames: []
+            usernames: currentUsername ? [currentUsername] : []
           };
           saveSharedRoom(newRoom);
           setRooms(prev => {
@@ -626,7 +647,7 @@ export default function App() {
               return updated;
             }
           });
-          setFriendUsernames([]);
+          setFriendUsernames(newRoom.usernames);
           setCurrentRoomId(roomId);
           setAppStatus("Created new room");
           // Clean URL after joining
@@ -643,7 +664,7 @@ export default function App() {
         }
       });
     }
-  }, [db, fetchSharedRoom, saveUserRooms]); // Removed rooms from deps to avoid loops
+  }, [db, fetchSharedRoom, saveUserRooms, showJoinModal]); // Removed saveSharedRoom from deps to avoid loops
 
   // Close room modal when clicking outside
   useEffect(() => {
@@ -681,6 +702,21 @@ export default function App() {
     
     // Normalize room name to create unique ID
     const normalizedId = normalizeRoomName(name);
+    
+    // First check local rooms list for duplicate name (case-insensitive)
+    const localDuplicate = rooms.find(r => 
+      r.id === normalizedId || r.name.toLowerCase() === name.toLowerCase()
+    );
+    if (localDuplicate) {
+      setError(`Room "${name}" already exists`);
+      setTimeout(() => setError(null), 2200);
+      // Switch to existing room instead
+      setCurrentRoomId(localDuplicate.id);
+      setNewRoomName("");
+      setShowRoomModal(false);
+      playBeep();
+      return;
+    }
     
     // Check if room already exists in Firebase
     const existingRoom = await checkRoomExistsByName(name);
@@ -789,16 +825,23 @@ export default function App() {
     const params = new URLSearchParams(window.location.search);
     const roomId = params.get("room");
     
-    if (roomId && db) {
+    if (!roomId || !db) {
+      setError("Invalid room link");
+      setTimeout(() => setError(null), 2200);
+      setShowJoinModal(false);
+      return;
+    }
+    
+    try {
       const sharedRoom = await fetchSharedRoom(roomId);
       if (sharedRoom) {
-        // Add username to room
+        // Add username to room if not already present
         const updatedUsernames = [...(sharedRoom.usernames || [])];
         if (!updatedUsernames.includes(username)) {
           updatedUsernames.push(username);
           await saveSharedRoom({
             id: roomId,
-            name: sharedRoom.name,
+            name: sharedRoom.name || `Room ${roomId.substring(0, 8)}`,
             usernames: updatedUsernames
           });
         }
@@ -831,7 +874,15 @@ export default function App() {
         // Clean URL
         window.history.replaceState({}, "", window.location.pathname);
         playBeep();
+      } else {
+        setError("Room not found");
+        setTimeout(() => setError(null), 2200);
+        setShowJoinModal(false);
       }
+    } catch (e) {
+      console.error("Error joining room:", e);
+      setError("Failed to join room");
+      setTimeout(() => setError(null), 2200);
     }
   };
 
