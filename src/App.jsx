@@ -204,8 +204,8 @@ export default function App() {
   const saveUserRooms = useCallback(async (roomsData) => {
     if (!db || !currentUserId || !USER_ROOMS_PATH) {
       setRooms(roomsData);
-      return;
-    }
+        return;
+      }
     try {
       await setDoc(doc(db, USER_ROOMS_PATH), { rooms: roomsData });
       setRooms(roomsData);
@@ -285,6 +285,12 @@ export default function App() {
   // Load shared room data from Firebase (room-specific data)
   useEffect(() => {
     if (!db || !SHARED_ROOM_PATH) return;
+    // Don't load room data if user hasn't joined yet (no username)
+    const hasUsername = localStorage.getItem("lb_leetcodeUsername");
+    if (!hasUsername) {
+      setFriendUsernames([]);
+      return;
+    }
     const docRef = doc(db, SHARED_ROOM_PATH);
     const unsub = onSnapshot(docRef, (snap) => {
       if (snap.exists()) {
@@ -354,7 +360,7 @@ export default function App() {
 
   const saveFriendsList = useCallback(async (usernames) => {
     // Update local state immediately
-    setFriendUsernames(usernames);
+      setFriendUsernames(usernames);
     setRooms(prev => prev.map(r => 
       r.id === currentRoomId ? { ...r, usernames } : r
     ));
@@ -562,6 +568,10 @@ export default function App() {
       const hasUsername = localStorage.getItem("lb_leetcodeUsername");
       if (!hasUsername) {
         // Show join modal to enter username - don't process room until username is entered
+        // Clear any existing room data to show clean state
+        setFriendUsernames([]);
+        setRooms([]);
+        setCurrentRoomId(null);
         setShowJoinModal(true);
         return;
       }
@@ -891,27 +901,14 @@ export default function App() {
           usernames: updatedUsernames
         }, { merge: true });
         
-        // Update local state
-        setRooms(prev => {
-          const exists = prev.some(r => r.id === roomId);
-          if (!exists) {
-            const newRooms = [...prev, {
-              id: roomId,
-              name: sharedRoom.name || `Room ${roomId.substring(0, 8)}`,
-              usernames: updatedUsernames
-            }];
-            saveUserRooms(newRooms);
-            return newRooms;
-          } else {
-            const updated = prev.map(r => 
-              r.id === roomId 
-                ? { ...r, name: sharedRoom.name || r.name, usernames: updatedUsernames }
-                : r
-            );
-            saveUserRooms(updated);
-            return updated;
-          }
-        });
+        // Update local state - start fresh with just this room (don't keep old rooms from localStorage)
+        const newRoom = {
+          id: roomId,
+          name: sharedRoom.name || `Room ${roomId.substring(0, 8)}`,
+          usernames: updatedUsernames
+        };
+        setRooms([newRoom]);
+        saveUserRooms([newRoom]);
         
         // Update state - this will trigger the shared room snapshot to sync
         setFriendUsernames(updatedUsernames);
