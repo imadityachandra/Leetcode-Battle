@@ -105,7 +105,12 @@ export default function App() {
     }
     return [{ id: "default", name: "Default Room", usernames: [] }];
   });
-  const [currentRoomId, setCurrentRoomId] = useState(() => localStorage.getItem("lb_currentRoom") || "default");
+  const [currentRoomId, setCurrentRoomId] = useState(() => {
+    // Check if there's a room in URL, otherwise use localStorage
+    const params = new URLSearchParams(window.location.search);
+    const urlRoomId = params.get("room");
+    return urlRoomId || localStorage.getItem("lb_currentRoom") || null;
+  });
   const [showRoomModal, setShowRoomModal] = useState(false);
   const [newRoomName, setNewRoomName] = useState("");
   const [editingRoomId, setEditingRoomId] = useState(null);
@@ -284,19 +289,40 @@ export default function App() {
 
   // Load shared room data from Firebase (room-specific data)
   useEffect(() => {
-    if (!db || !SHARED_ROOM_PATH) return;
+    if (!db || !SHARED_ROOM_PATH || !currentRoomId) return;
     // Don't load room data if user hasn't joined yet (no username)
     const hasUsername = localStorage.getItem("lb_leetcodeUsername");
     if (!hasUsername) {
       setFriendUsernames([]);
       return;
     }
+    
     const docRef = doc(db, SHARED_ROOM_PATH);
-    const unsub = onSnapshot(docRef, (snap) => {
+    const unsub = onSnapshot(docRef, async (snap) => {
       if (snap.exists()) {
         const data = snap.data();
-        // Update friends list from shared room
-        setFriendUsernames(data?.usernames || []);
+        const currentUsername = localStorage.getItem("lb_leetcodeUsername");
+        let usernames = [...(data?.usernames || [])];
+        
+        // Ensure current user is always in the room (persist on refresh)
+        if (currentUsername && !usernames.includes(currentUsername)) {
+          usernames.push(currentUsername);
+          // Update Firebase to include current user
+          try {
+            await setDoc(docRef, {
+              ...data,
+              id: currentRoomId,
+              name: data.name || (currentRoomId === "default" ? "Default Room" : `Room ${currentRoomId.substring(0, 8)}`),
+              usernames: usernames
+            }, { merge: true });
+          } catch (e) {
+            console.error("Error updating usernames in snapshot:", e);
+          }
+        }
+        
+        // Update friends list from shared room (always sync from Firebase)
+        setFriendUsernames(usernames);
+        
         // Update war state (room-specific)
         if (data?.war) {
           setWarState(data.war);
@@ -310,6 +336,7 @@ export default function App() {
           setWarState(null);
           setWarSubmissions({});
         }
+        
         // Update local rooms state with shared room data
         setRooms(prev => {
           const roomIndex = prev.findIndex(r => r.id === currentRoomId);
@@ -318,7 +345,7 @@ export default function App() {
             updated[roomIndex] = {
               ...updated[roomIndex],
               name: data.name || updated[roomIndex].name || (currentRoomId === "default" ? "Default Room" : `Room ${currentRoomId.substring(0, 8)}`),
-              usernames: data.usernames || []
+              usernames: usernames
             };
             return updated;
           } else {
@@ -326,23 +353,23 @@ export default function App() {
             const newRoom = {
               id: currentRoomId,
               name: data.name || (currentRoomId === "default" ? "Default Room" : `Room ${currentRoomId.substring(0, 8)}`),
-              usernames: data.usernames || []
+              usernames: usernames
             };
             return [...prev, newRoom];
           }
         });
       } else {
-        // Room doesn't exist in Firebase yet - initialize it (especially for default room)
-        if (currentRoomId === "default") {
-          const defaultRoomData = {
-            id: "default",
-            name: "Default Room",
-            usernames: []
-          };
-          setDoc(docRef, defaultRoomData, { merge: true }).catch(e => {
-            console.error("Error initializing default room:", e);
-          });
-        }
+        // Room doesn't exist in Firebase yet - initialize it
+        const currentUsername = localStorage.getItem("lb_leetcodeUsername");
+        const roomData = {
+          id: currentRoomId,
+          name: currentRoomId === "default" ? "Default Room" : `Room ${currentRoomId.substring(0, 8)}`,
+          usernames: currentUsername ? [currentUsername] : []
+        };
+        setDoc(docRef, roomData, { merge: true }).catch(e => {
+          console.error("Error initializing room:", e);
+        });
+        setFriendUsernames(roomData.usernames);
       }
     }, (err) => {
       console.error("Firestore shared room snapshot error", err);
@@ -581,12 +608,16 @@ export default function App() {
         return;
       }
       
+      // Set currentRoomId first so snapshot listener can initialize
+      setCurrentRoomId(roomId);
+      
       // Always fetch from Firebase to ensure we have the latest room data
       // This ensures default room and other rooms are properly synced
       fetchSharedRoom(roomId).then(async (sharedRoom) => {
+        const currentUsername = localStorage.getItem("lb_leetcodeUsername");
+        
         if (sharedRoom) {
-          // Room exists in Firebase - update user's local list with latest data
-          const currentUsername = localStorage.getItem("lb_leetcodeUsername");
+          // Room exists in Firebase - ensure current user is in the room
           let updatedUsernames = [...(sharedRoom.usernames || [])];
           
           // Add current user to room if they have a username and aren't already in the room
@@ -603,6 +634,7 @@ export default function App() {
             }, { merge: true });
           }
           
+          // Update local state - snapshot listener will handle real-time updates
           setRooms(prev => {
             const exists = prev.some(r => r.id === roomId);
             if (!exists) {
@@ -615,7 +647,7 @@ export default function App() {
               saveUserRooms(newRooms);
               return newRooms;
             } else {
-              // Update existing room with latest data from Firebase (prioritize Firebase data)
+              // Update existing room with latest data from Firebase
               const updated = prev.map(r => 
                 r.id === roomId 
                   ? {
@@ -629,22 +661,27 @@ export default function App() {
               return updated;
             }
           });
-          // Update friend usernames immediately from shared room
-          setFriendUsernames(updatedUsernames);
-          setCurrentRoomId(roomId);
+          
+          // Snapshot listener will update friendUsernames in real-time
           setAppStatus("Joined room!");
           // Clean URL after joining
           const newUrl = window.location.pathname;
           window.history.replaceState({}, "", newUrl);
         } else {
           // Room doesn't exist in Firebase - create it
-          const currentUsername = localStorage.getItem("lb_leetcodeUsername");
           const newRoom = {
             id: roomId,
             name: roomId === "default" ? "Default Room" : `Room ${roomId.substring(0, 8)}`,
             usernames: currentUsername ? [currentUsername] : []
           };
-          saveSharedRoom(newRoom);
+          
+          // Save to Firebase
+          const roomPath = typeof __app_id !== "undefined"
+            ? `/artifacts/${appId}/rooms/${roomId}`
+            : `rooms/${roomId}`;
+          await setDoc(doc(db, roomPath), newRoom, { merge: true });
+          
+          // Update local state
           setRooms(prev => {
             const exists = prev.some(r => r.id === roomId);
             if (!exists) {
@@ -660,8 +697,8 @@ export default function App() {
               return updated;
             }
           });
-          setFriendUsernames(newRoom.usernames);
-          setCurrentRoomId(roomId);
+          
+          // Snapshot listener will update friendUsernames
           setAppStatus("Created new room");
           // Clean URL after joining
           const newUrl = window.location.pathname;
@@ -883,6 +920,9 @@ export default function App() {
     }
     
     try {
+      // Set currentRoomId first so snapshot listener can initialize
+      setCurrentRoomId(roomId);
+      
       const sharedRoom = await fetchSharedRoom(roomId);
       if (sharedRoom) {
         // Add username to room if not already present
@@ -910,9 +950,7 @@ export default function App() {
         setRooms([newRoom]);
         saveUserRooms([newRoom]);
         
-        // Update state - this will trigger the shared room snapshot to sync
-        setFriendUsernames(updatedUsernames);
-        setCurrentRoomId(roomId);
+        // Snapshot listener will update friendUsernames in real-time
         setShowJoinModal(false);
         setAppStatus("Joined room!");
         
@@ -923,12 +961,14 @@ export default function App() {
         setError("Room not found");
         setTimeout(() => setError(null), 2200);
         setShowJoinModal(false);
+        setCurrentRoomId(null); // Reset if room not found
       }
     } catch (e) {
       console.error("Error joining room:", e);
       setError("Failed to join room");
       setTimeout(() => setError(null), 2200);
       setShowJoinModal(false);
+      setCurrentRoomId(null); // Reset on error
     }
   };
 
