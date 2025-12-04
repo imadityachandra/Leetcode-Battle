@@ -140,6 +140,8 @@ export default function App() {
   const [warState, setWarState] = useState(null); // { active: bool, problemLink: string, problemSlug: string, startTime: number, duration: number, winner: string, submissions: {} }
   const [warTimer, setWarTimer] = useState(0); // seconds remaining
   const [warSubmissions, setWarSubmissions] = useState({}); // { username: { status: string, time: number } }
+  const [warDifficulty, setWarDifficulty] = useState("medium"); // "easy", "medium", "hard", or "any"
+  const [usedProblems, setUsedProblems] = useState([]); // Track recently used problems to avoid repeats
 
   // Firestore doc paths
   // Shared room path - all users access the same room data
@@ -1224,37 +1226,67 @@ export default function App() {
   /* ---------------------------
      War functionality
      --------------------------- */
-  // Get random LeetCode problem
+  // Get random LeetCode problem with difficulty filter
   const getRandomProblem = async () => {
     try {
-      // Use LeetCode's problem list API or generate random problem slug
-      // For now, we'll use a curated list of popular problems
-      const problems = [
-        "two-sum",
-        "add-two-numbers",
-        "longest-substring-without-repeating-characters",
-        "median-of-two-sorted-arrays",
-        "longest-palindromic-substring",
-        "zigzag-conversion",
-        "reverse-integer",
-        "string-to-integer-atoi",
-        "palindrome-number",
-        "container-with-most-water",
-        "3sum",
-        "longest-common-prefix",
-        "valid-parentheses",
-        "merge-two-sorted-lists",
-        "remove-duplicates-from-sorted-array",
-        "remove-element",
-        "find-the-index-of-the-first-occurrence-in-a-string",
-        "search-insert-position",
-        "length-of-last-word",
-        "plus-one"
-      ];
-      const randomProblem = problems[Math.floor(Math.random() * problems.length)];
+      // Curated list of problems with difficulty levels
+      const problemsByDifficulty = {
+        easy: [
+          "two-sum", "reverse-integer", "palindrome-number", "valid-parentheses",
+          "remove-duplicates-from-sorted-array", "remove-element", "plus-one",
+          "length-of-last-word", "search-insert-position", "climbing-stairs",
+          "best-time-to-buy-and-sell-stock", "maximum-subarray", "house-robber",
+          "contains-duplicate", "missing-number", "single-number", "majority-element",
+          "happy-number", "power-of-two", "valid-anagram", "first-unique-character-in-a-string",
+          "reverse-string", "valid-palindrome", "implement-strstr", "count-and-say"
+        ],
+        medium: [
+          "add-two-numbers", "longest-substring-without-repeating-characters",
+          "container-with-most-water", "3sum", "longest-common-prefix",
+          "merge-two-sorted-lists", "remove-nth-node-from-end-of-list",
+          "swap-nodes-in-pairs", "reverse-nodes-in-k-group", "rotate-list",
+          "group-anagrams", "longest-palindromic-substring", "zigzag-conversion",
+          "string-to-integer-atoi", "find-the-index-of-the-first-occurrence-in-a-string",
+          "search-in-rotated-sorted-array", "combination-sum", "permutations",
+          "merge-intervals", "unique-paths", "minimum-path-sum", "decode-ways",
+          "word-break", "coin-change", "longest-increasing-subsequence"
+        ],
+        hard: [
+          "median-of-two-sorted-arrays", "regular-expression-matching",
+          "merge-k-sorted-lists", "reverse-nodes-in-k-group", "trapping-rain-water",
+          "wildcard-matching", "n-queens", "n-queens-ii", "sudoku-solver",
+          "first-missing-positive", "longest-valid-parentheses", "edit-distance",
+          "minimum-window-substring", "largest-rectangle-in-histogram",
+          "maximal-rectangle", "binary-tree-maximum-path-sum", "word-ladder",
+          "word-ladder-ii", "serialize-and-deserialize-binary-tree", "alien-dictionary"
+        ]
+      };
+      
+      // Get problems based on selected difficulty
+      let availableProblems = [];
+      if (warDifficulty === "any") {
+        availableProblems = [...problemsByDifficulty.easy, ...problemsByDifficulty.medium, ...problemsByDifficulty.hard];
+      } else {
+        availableProblems = problemsByDifficulty[warDifficulty] || problemsByDifficulty.medium;
+      }
+      
+      // Filter out recently used problems (last 10)
+      const recentProblems = usedProblems.slice(-10);
+      const filteredProblems = availableProblems.filter(p => !recentProblems.includes(p));
+      
+      // If all problems were used recently, reset and use all problems
+      const problemsToChooseFrom = filteredProblems.length > 0 ? filteredProblems : availableProblems;
+      
+      // Select random problem
+      const randomIndex = Math.floor(Math.random() * problemsToChooseFrom.length);
+      const selectedProblem = problemsToChooseFrom[randomIndex];
+      
+      // Track this problem as used
+      setUsedProblems(prev => [...prev, selectedProblem].slice(-20)); // Keep last 20
+      
       return {
-        link: `https://leetcode.com/problems/${randomProblem}/`,
-        slug: randomProblem
+        link: `https://leetcode.com/problems/${selectedProblem}/`,
+        slug: selectedProblem
       };
     } catch (e) {
       console.error("Error getting random problem:", e);
@@ -1558,8 +1590,8 @@ export default function App() {
               backoffTimeout = setTimeout(() => {
                 isRateLimited = false;
                 backoffTimeout = null;
-                // Restart checking with longer interval (5 minutes)
-                checkInterval = setInterval(checkSubmissions, 5 * 60 * 1000);
+                // Restart checking with longer interval (10 minutes after rate limit)
+                checkInterval = setInterval(checkSubmissions, 10 * 60 * 1000);
               }, 10 * 60 * 1000); // 10 minutes backoff
               break; // Stop checking other users
             } else {
@@ -1627,16 +1659,16 @@ export default function App() {
     
     // Run immediately, then set interval
     checkSubmissions();
-    // Check more frequently initially (every 30 seconds for first 5 minutes, then every 2 minutes)
+    // Reduced frequency to avoid 429 errors: Check every 90 seconds initially, then every 5 minutes
     let checkCount = 0;
     checkInterval = setInterval(() => {
       checkCount++;
       checkSubmissions();
-      if (checkCount >= 10) { // After 10 checks (5 minutes), switch to longer interval
+      if (checkCount >= 4) { // After 4 checks (6 minutes), switch to longer interval
         clearInterval(checkInterval);
-        checkInterval = setInterval(checkSubmissions, 2 * 60 * 1000); // Check every 2 minutes
+        checkInterval = setInterval(checkSubmissions, 5 * 60 * 1000); // Check every 5 minutes
       }
-    }, 30 * 1000); // Check every 30 seconds initially
+    }, 90 * 1000); // Check every 90 seconds initially (reduced from 30 seconds)
     
     // Update ref when warState changes
     const intervalId = setInterval(updateRef, 1000); // Update ref every second
@@ -2417,7 +2449,7 @@ export default function App() {
               </div>
             ) : (
               <div className="card" style={{ marginBottom: 20 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
                   <div>
                     <h3 style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
                       <Sword className="icon" style={{ width: 20, height: 20 }} />
@@ -2431,6 +2463,43 @@ export default function App() {
                     <Play className="icon" style={{ width: 18, height: 18 }} />
                     Start War
                   </button>
+                </div>
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8, color: "var(--text)" }}>
+                    Problem Difficulty:
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {["easy", "medium", "hard", "any"].map((diff) => (
+                      <button
+                        key={diff}
+                        onClick={() => setWarDifficulty(diff)}
+                        style={{
+                          padding: "6px 12px",
+                          borderRadius: "6px",
+                          border: `2px solid ${warDifficulty === diff ? "#ef4444" : "var(--border)"}`,
+                          background: warDifficulty === diff ? "rgba(239, 68, 68, 0.1)" : "var(--card)",
+                          color: "var(--text)",
+                          fontWeight: warDifficulty === diff ? 700 : 500,
+                          fontSize: 13,
+                          cursor: "pointer",
+                          textTransform: "capitalize",
+                          transition: "all 0.2s ease"
+                        }}
+                        onMouseEnter={(e) => {
+                          if (warDifficulty !== diff) {
+                            e.currentTarget.style.background = "var(--hover)";
+                          }
+                        }}
+                        onMouseLeave={(e) => {
+                          if (warDifficulty !== diff) {
+                            e.currentTarget.style.background = "var(--card)";
+                          }
+                        }}
+                      >
+                        {diff}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
             )}
