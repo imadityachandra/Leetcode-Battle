@@ -92,24 +92,19 @@ export default function App() {
   const [soundOn, setSoundOn] = useState(() => localStorage.getItem("soundOn") === "1");
   const [theme, setTheme] = useState(() => localStorage.getItem("theme") || "light");
   
-  // Room state
-  const [rooms, setRooms] = useState(() => {
-    const saved = localStorage.getItem("lb_rooms");
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        return Array.isArray(parsed) && parsed.length > 0 ? parsed : [{ id: "default", name: "Default Room", usernames: [] }];
-      } catch {
-        return [{ id: "default", name: "Default Room", usernames: [] }];
-      }
-    }
-    return [{ id: "default", name: "Default Room", usernames: [] }];
-  });
+  // Room state - restore from localStorage if user has joined before
+  const [rooms, setRooms] = useState([]);
   const [currentRoomId, setCurrentRoomId] = useState(() => {
-    // Check if there's a room in URL, otherwise use localStorage
+    // Check URL parameter first, then localStorage
     const params = new URLSearchParams(window.location.search);
     const urlRoomId = params.get("room");
-    return urlRoomId || localStorage.getItem("lb_currentRoom") || null;
+    if (urlRoomId) return urlRoomId;
+    // Check if user has a saved room (only if they have username too)
+    const hasUsername = localStorage.getItem("lb_leetcodeUsername");
+    if (hasUsername) {
+      return localStorage.getItem("lb_currentRoom") || null;
+    }
+    return null;
   });
   const [showRoomModal, setShowRoomModal] = useState(false);
   const [newRoomName, setNewRoomName] = useState("");
@@ -118,17 +113,24 @@ export default function App() {
   const [linkCopied, setLinkCopied] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
   
-  // Initial setup state
+  // Initial setup state - only show if user hasn't joined before
   const [showInitialSetup, setShowInitialSetup] = useState(() => {
+    // Check if user has username and room saved
     const hasUsername = localStorage.getItem("lb_leetcodeUsername");
-    const hasRoom = localStorage.getItem("lb_currentRoom") && localStorage.getItem("lb_currentRoom") !== "default";
-    return !hasUsername || !hasRoom;
+    const hasRoom = localStorage.getItem("lb_currentRoom");
+    // Show setup if no username, or if no room (unless URL has room param)
+    const urlRoomId = new URLSearchParams(window.location.search).get("room");
+    return !hasUsername || (!hasRoom && !urlRoomId);
   });
-  const [initialLeetCodeUsername, setInitialLeetCodeUsername] = useState(() => localStorage.getItem("lb_leetcodeUsername") || "");
+  const [initialLeetCodeUsername, setInitialLeetCodeUsername] = useState(() => {
+    return localStorage.getItem("lb_leetcodeUsername") || "";
+  });
   const [initialRoomName, setInitialRoomName] = useState("");
   const [showJoinModal, setShowJoinModal] = useState(false);
   const [joinLeetCodeUsername, setJoinLeetCodeUsername] = useState("");
-  const [currentLeetCodeUsername, setCurrentLeetCodeUsername] = useState(() => localStorage.getItem("lb_leetcodeUsername") || "");
+  const [currentLeetCodeUsername, setCurrentLeetCodeUsername] = useState(() => {
+    return localStorage.getItem("lb_leetcodeUsername") || "";
+  });
   
   // War state
   const [warState, setWarState] = useState(null); // { active: bool, problemLink: string, problemSlug: string, startTime: number, duration: number, winner: string, submissions: {} }
@@ -197,12 +199,53 @@ export default function App() {
   /* ---------------------------
      Load and save rooms
      --------------------------- */
+  
+  // Restore session on mount if user has joined before
   useEffect(() => {
-    localStorage.setItem("lb_rooms", JSON.stringify(rooms));
+    // Wait for Firebase to be initialized
+    if (!db) return;
+    
+    const savedUsername = localStorage.getItem("lb_leetcodeUsername");
+    const savedRoomId = localStorage.getItem("lb_currentRoom");
+    const savedRooms = localStorage.getItem("lb_rooms");
+    
+    // Only restore if user has username (meaning they've joined before)
+    if (savedUsername && savedRoomId) {
+      // Restore username
+      setCurrentLeetCodeUsername(savedUsername);
+      
+      // Restore rooms if available (Firebase will sync and update these later)
+      if (savedRooms) {
+        try {
+          const parsed = JSON.parse(savedRooms);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setRooms(parsed);
+          }
+        } catch (e) {
+          console.error("Error parsing saved rooms:", e);
+        }
+      }
+      
+      // Restore current room (already set in useState initializer, but ensure it's set)
+      if (savedRoomId) {
+        setCurrentRoomId(savedRoomId);
+      }
+      
+      // Hide initial setup since user has joined before
+      setShowInitialSetup(false);
+    }
+  }, [db, currentRoomId]); // Run when Firebase is ready
+  
+  useEffect(() => {
+    if (rooms.length > 0) {
+      localStorage.setItem("lb_rooms", JSON.stringify(rooms));
+    }
   }, [rooms]);
 
   useEffect(() => {
-    localStorage.setItem("lb_currentRoom", currentRoomId);
+    if (currentRoomId) {
+      localStorage.setItem("lb_currentRoom", currentRoomId);
+    }
   }, [currentRoomId]);
 
   // Save user's local rooms list to Firebase (for UI)
@@ -291,8 +334,7 @@ export default function App() {
   useEffect(() => {
     if (!db || !SHARED_ROOM_PATH || !currentRoomId) return;
     // Don't load room data if user hasn't joined yet (no username)
-    const hasUsername = localStorage.getItem("lb_leetcodeUsername");
-    if (!hasUsername) {
+    if (!currentLeetCodeUsername) {
         setFriendUsernames([]);
         return;
       }
@@ -301,7 +343,7 @@ export default function App() {
     const unsub = onSnapshot(docRef, async (snap) => {
       if (snap.exists()) {
       const data = snap.data();
-        const currentUsername = localStorage.getItem("lb_leetcodeUsername");
+        const currentUsername = currentLeetCodeUsername;
         let usernames = [...(data?.usernames || [])];
         
         // Ensure current user is always in the room (persist on refresh)
@@ -389,7 +431,7 @@ export default function App() {
       } else {
         // Room doesn't exist in Firebase yet - initialize it
         // BUT: Don't auto-add username to default room
-        const currentUsername = localStorage.getItem("lb_leetcodeUsername");
+        const currentUsername = currentLeetCodeUsername;
         const roomData = {
           id: currentRoomId,
           name: currentRoomId === "default" ? "Default Room" : `Room ${currentRoomId.substring(0, 8)}`,
@@ -404,7 +446,7 @@ export default function App() {
       console.error("Firestore shared room snapshot error", err);
     });
     return () => unsub();
-  }, [db, SHARED_ROOM_PATH, currentRoomId]);
+  }, [db, SHARED_ROOM_PATH, currentRoomId, currentLeetCodeUsername]);
 
   // Get current room usernames
   const currentRoomUsernames = useMemo(() => {
@@ -629,17 +671,14 @@ export default function App() {
     const params = new URLSearchParams(window.location.search);
     const roomId = params.get("room");
     if (roomId && db) {
-      // Check if user has entered their LeetCode username
-      const hasUsername = localStorage.getItem("lb_leetcodeUsername");
-      if (!hasUsername) {
-        // Show join modal to enter username - don't process room until username is entered
-        // Clear any existing room data to show clean state
-        setFriendUsernames([]);
-        setRooms([]);
-        setCurrentRoomId(null);
-        setShowJoinModal(true);
-        return;
-      }
+      // Always show join modal when joining via URL - require username entry
+      // Clear any existing room data to show clean state
+      setFriendUsernames([]);
+      setRooms([]);
+      setCurrentRoomId(null);
+      setShowInitialSetup(false); // Hide initial setup if showing join modal
+      setShowJoinModal(true);
+      return;
       
       // If join modal is showing, don't process room yet (wait for handleJoinRoom)
       if (showJoinModal) {
@@ -652,7 +691,7 @@ export default function App() {
       // Always fetch from Firebase to ensure we have the latest room data
       // This ensures default room and other rooms are properly synced
       fetchSharedRoom(roomId).then(async (sharedRoom) => {
-        const currentUsername = localStorage.getItem("lb_leetcodeUsername");
+        const currentUsername = currentLeetCodeUsername;
         
         if (sharedRoom) {
           // Room exists in Firebase - ensure current user is in the room
@@ -710,6 +749,7 @@ export default function App() {
         } else {
           // Room doesn't exist in Firebase - create it
           // BUT: Don't auto-add username to default room
+          // Note: currentUsername comes from join modal, not localStorage
           const newRoom = {
             id: roomId,
             name: roomId === "default" ? "Default Room" : `Room ${roomId.substring(0, 8)}`,
