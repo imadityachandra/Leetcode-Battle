@@ -541,7 +541,16 @@ export default function App() {
     }
   }, [friendUsernames, currentUserId, fetchWithRetry]);
 
-  // Removed auto-fetch on app open - data will only load when user clicks Refresh or Sync Now
+  // Auto-sync leaderboard when usernames are added or removed
+  useEffect(() => {
+    // Only fetch if we have usernames and a user ID
+    if (friendUsernames.length > 0 && currentUserId) {
+      fetchAllUsersData();
+    } else if (friendUsernames.length === 0) {
+      // Clear leaderboard if no usernames
+      setLeaderboardData([]);
+    }
+  }, [friendUsernames, currentUserId, fetchAllUsersData]);
 
   /* ---------------------------
      Sorting
