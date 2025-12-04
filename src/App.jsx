@@ -53,6 +53,10 @@ const firebaseConfig = typeof __firebase_config !== "undefined"
 
 const initialAuthToken = typeof __initial_auth_token !== "undefined" ? __initial_auth_token : null;
 const appId = typeof __app_id !== "undefined" ? __app_id : "default-app-id";
+// API Base URL - Using third-party wrapper for LeetCode API
+// NOTE: LeetCode's public API is limited to ~20 most recent submissions
+// This means if a user has >20 submissions since war started, older ones may not be detected
+// Alternative: Use authenticated LeetCode API with session cookies (requires user login)
 const API_BASE_URL = "https://alfa-leetcode-api.onrender.com";
 
 /* ---------------------------
@@ -334,6 +338,10 @@ export default function App() {
   }, [db, currentUserId, currentRoomId, USER_ROOMS_PATH]);
 
   // Load shared room data from Firebase (room-specific data)
+  // Use ref to prevent infinite loops from writing back to Firebase
+  const isUpdatingRef = useRef(false);
+  const lastUpdateRef = useRef({ usernames: null, timestamp: 0 });
+  
   useEffect(() => {
     if (!db || !SHARED_ROOM_PATH || !currentRoomId) return;
     // Don't load room data if user hasn't joined yet (no username)
@@ -344,16 +352,30 @@ export default function App() {
     
     const docRef = doc(db, SHARED_ROOM_PATH);
     const unsub = onSnapshot(docRef, async (snap) => {
+      // Prevent infinite loops - don't process if we're currently updating
+      if (isUpdatingRef.current) {
+        console.log("[Room Sync] Skipping snapshot - update in progress");
+        return;
+      }
+      
       if (snap.exists()) {
       const data = snap.data();
         const currentUsername = currentLeetCodeUsername;
         let usernames = [...(data?.usernames || [])];
         
+        // Check if usernames actually changed to avoid unnecessary updates
+        const usernamesStr = JSON.stringify(usernames.sort());
+        const lastUsernamesStr = JSON.stringify((lastUpdateRef.current.usernames || []).sort());
+        const timeSinceLastUpdate = Date.now() - lastUpdateRef.current.timestamp;
+        
         // Ensure current user is always in the room (persist on refresh)
         // BUT: Don't auto-add to default room - user must explicitly join
-        if (currentUsername && !usernames.includes(currentUsername) && currentRoomId !== "default") {
+        // Only update if username is missing AND we haven't updated recently (prevent loops)
+        if (currentUsername && !usernames.includes(currentUsername) && currentRoomId !== "default" && timeSinceLastUpdate > 5000) {
           usernames.push(currentUsername);
-          // Update Firebase to include current user
+          // Mark that we're updating to prevent snapshot from triggering again
+          isUpdatingRef.current = true;
+          
           try {
             await setDoc(docRef, {
               ...data,
@@ -361,8 +383,22 @@ export default function App() {
               name: data.name || (currentRoomId === "default" ? "Default Room" : `Room ${currentRoomId.substring(0, 8)}`),
               usernames: usernames
             }, { merge: true });
+            
+            // Update ref to track what we just wrote
+            lastUpdateRef.current = { usernames, timestamp: Date.now() };
+            
+            // Reset flag after a short delay to allow snapshot to process
+            setTimeout(() => {
+              isUpdatingRef.current = false;
+            }, 1000);
           } catch (e) {
             console.error("Error updating usernames in snapshot:", e);
+            isUpdatingRef.current = false;
+          }
+        } else {
+          // Update ref even if we didn't write (to track current state)
+          if (usernamesStr !== lastUsernamesStr) {
+            lastUpdateRef.current = { usernames, timestamp: Date.now() };
           }
         }
         
@@ -373,6 +409,13 @@ export default function App() {
         // Use functional update to merge with local state and avoid overwriting pending updates
         if (data?.war) {
           setWarState(prevWar => {
+            // If war is cancelled in Firebase (active: false), always use Firebase data immediately
+            // This ensures cancellation syncs across all users
+            if (data.war.active === false) {
+              console.log("[War Sync] War cancelled detected from Firebase, updating all users");
+              return data.war; // Always use Firebase data when war is cancelled
+            }
+            
             // If we have a local war state and it's the same war, merge submissions
             if (prevWar && prevWar.problemSlug === data.war.problemSlug && prevWar.startTime === data.war.startTime) {
               // Merge: prefer local submissions if they're newer, otherwise use Firebase
@@ -404,6 +447,8 @@ export default function App() {
             setWarSubmissions({});
           }
         } else {
+          // No war data in Firebase - clear war state
+          console.log("[War Sync] No war data in Firebase, clearing war state");
           setWarState(null);
           setWarSubmissions({});
         }
@@ -489,7 +534,21 @@ export default function App() {
     let tries = 0;
     while (tries < 2) { // Reduced retries to avoid hitting limits
       try {
-        const res = await fetch(url);
+        // Add cache-busting parameter to ensure fresh data
+        const separator = url.includes('?') ? '&' : '?';
+        const cacheBustUrl = `${url}${separator}_t=${Date.now()}`;
+        
+        // Add no-cache headers to prevent browser/CDN caching
+        const res = await fetch(cacheBustUrl, {
+          method: 'GET',
+          headers: {
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+            'Expires': '0'
+          },
+          cache: 'no-store' // Force fetch to bypass cache
+        });
+        
         if (res.status === 429) {
           // Rate limited - throw immediately without retry
           const errorText = await res.text().catch(() => "");
@@ -497,7 +556,22 @@ export default function App() {
           throw new Error("Rate limited");
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return await res.json();
+        const data = await res.json();
+        
+        // Log API response for debugging
+        if (url.includes('/submission')) {
+          console.log(`[API] Fetched ${Array.isArray(data) ? data.length : 'unknown'} submissions from ${url}`);
+          if (Array.isArray(data) && data.length > 0) {
+            console.log(`[API] Latest submission:`, {
+              title: data[0].title,
+              titleSlug: data[0].titleSlug,
+              status: data[0].statusDisplay || data[0].status || data[0].statusCode,
+              timestamp: new Date(parseInt(data[0].timestamp || "0", 10) * 1000).toISOString()
+            });
+          }
+        }
+        
+        return data;
       } catch (e) {
         tries++;
         if (tries >= 2 || e.message === "Rate limited") throw e;
@@ -1206,17 +1280,25 @@ export default function App() {
     
     const updatedWar = {
       ...warState,
-      active: false
+      active: false,
+      cancelled: true, // Mark as cancelled for clarity
+      cancelledAt: Date.now() // Track when it was cancelled
     };
     
+    // Save to Firebase first to ensure all users see the cancellation
+    console.log("[War Cancel] Cancelling war and syncing to Firebase");
     await saveSharedRoom({ war: updatedWar });
+    
+    // Update local state - snapshot listener will also update this, but set it immediately for responsiveness
     setWarState(updatedWar);
+    setWarSubmissions({}); // Clear submissions when war is cancelled
     playBeep();
   };
 
   // Check for winner by polling submissions for the specific problem
   useEffect(() => {
-    if (!warState || !warState.active || warState.winner || !warState.problemSlug) return;
+    // Stop checking if war is not active, has a winner, is cancelled, or missing problem slug
+    if (!warState || !warState.active || warState.winner || warState.cancelled || !warState.problemSlug) return;
     
     let checkInterval;
     let isRateLimited = false;
@@ -1238,7 +1320,13 @@ export default function App() {
       
       // Get latest warState from ref to avoid stale closure
       const currentWar = warStateRef.current;
-      if (!currentWar || !currentWar.active || currentWar.winner || !currentWar.problemSlug) {
+      // Stop checking if war is not active, has winner, is cancelled, or missing problem slug
+      if (!currentWar || !currentWar.active || currentWar.winner || currentWar.cancelled || !currentWar.problemSlug) {
+        console.log("[War Check] Stopping checks - war cancelled or inactive");
+        if (checkInterval) {
+          clearInterval(checkInterval);
+          checkInterval = null;
+        }
         return;
       }
       
@@ -1262,9 +1350,34 @@ export default function App() {
           }
           
           try {
-            const submission = await fetchWithRetry(`${API_BASE_URL}/${username}/submission?limit=10`);
+            // Fetch more submissions to ensure we get all submissions since war started
+            // Note: LeetCode's public API is limited to ~20 most recent submissions
+            // The third-party API wrapper may have similar limitations
+            // Calculate how many submissions we might need (war duration in minutes / average submission time)
+            // For safety, fetch at least 50 submissions, but API may only return 20
+            const warDurationMinutes = (Date.now() - currentWar.startTime) / (1000 * 60);
+            const estimatedLimit = Math.max(50, Math.min(200, Math.ceil(warDurationMinutes * 2))); // Assume max 2 submissions per minute
+            
+            console.log(`[War Check] Fetching submissions for ${username} with limit=${estimatedLimit} (war started ${Math.round(warDurationMinutes)} minutes ago)`);
+            const submission = await fetchWithRetry(`${API_BASE_URL}/${username}/submission?limit=${estimatedLimit}`);
+            
             if (submission && Array.isArray(submission) && submission.length > 0) {
-              console.log(`[War Check] Fetched ${submission.length} submissions for ${username}`);
+              console.log(`[War Check] Fetched ${submission.length} submissions for ${username} (requested ${estimatedLimit})`);
+              
+              // Warn if we got fewer submissions than requested (API limitation)
+              if (submission.length < estimatedLimit && submission.length < 50) {
+                console.warn(`[War Check] ⚠️ API only returned ${submission.length} submissions (requested ${estimatedLimit}). This may be an API limitation.`);
+              }
+              
+              // Check if the oldest submission is still within war time
+              // If not, we might be missing submissions due to API limit
+              const oldestSubmission = submission[submission.length - 1];
+              if (oldestSubmission) {
+                const oldestTime = parseInt(oldestSubmission.timestamp || "0", 10) * 1000;
+                if (oldestTime > currentWar.startTime && submission.length >= 20) {
+                  console.warn(`[War Check] ⚠️ Oldest submission (${new Date(oldestTime).toISOString()}) is still within war time, but we got ${submission.length} submissions. API may be limiting results.`);
+                }
+              }
               
               // Find all submissions for this specific problem during the war
               let submissionCount = 0;
@@ -1328,17 +1441,41 @@ export default function App() {
               
               // Update latest submission status
               if (latestSubmission) {
-                const status = latestSubmission.statusDisplay || latestSubmission.status || latestSubmission.statusCode || "Unknown";
+                // Try multiple ways to get the status - LeetCode API can return it in different fields
+                const status = latestSubmission.statusDisplay || 
+                              latestSubmission.status || 
+                              latestSubmission.statusCode || 
+                              latestSubmission.status_code ||
+                              (latestSubmission.statusDisplay === undefined && latestSubmission.status === undefined ? 
+                                (latestSubmission.statusCode === 10 ? "Accepted" : 
+                                 latestSubmission.statusCode === 11 ? "Wrong Answer" :
+                                 latestSubmission.statusCode === 12 ? "Memory Limit Exceeded" :
+                                 latestSubmission.statusCode === 13 ? "Output Limit Exceeded" :
+                                 latestSubmission.statusCode === 14 ? "Time Limit Exceeded" :
+                                 latestSubmission.statusCode === 15 ? "Runtime Error" :
+                                 latestSubmission.statusCode === 16 ? "Internal Error" :
+                                 latestSubmission.statusCode === 20 ? "Compile Error" :
+                                 "Unknown") : "Unknown");
+                
                 const existingSubmission = updatedSubmissions[username];
                 
-                // Always update if we don't have a submission, or if this is newer
-                if (!existingSubmission || latestTime > existingSubmission.time) {
+                // Always update if we don't have a submission, or if this is newer (even by 1ms)
+                if (!existingSubmission || latestTime >= existingSubmission.time) {
                   console.log(`[War Check] Updating ${username} status: ${status} (time: ${new Date(latestTime).toISOString()})`);
+                  console.log(`[War Check] Submission details:`, {
+                    statusDisplay: latestSubmission.statusDisplay,
+                    status: latestSubmission.status,
+                    statusCode: latestSubmission.statusCode,
+                    status_code: latestSubmission.status_code,
+                    title: latestSubmission.title,
+                    titleSlug: latestSubmission.titleSlug
+                  });
+                  
                   updatedSubmissions[username] = {
                     status: status,
                     time: latestTime,
-                    runtime: latestSubmission.runtime || "N/A",
-                    memory: latestSubmission.memory || "N/A"
+                    runtime: latestSubmission.runtime || latestSubmission.runtimeDisplay || "N/A",
+                    memory: latestSubmission.memory || latestSubmission.memoryDisplay || "N/A"
                   };
                   hasUpdates = true;
                   
@@ -1346,7 +1483,9 @@ export default function App() {
                   const isAccepted = status === "Accepted" || 
                                     String(status).toLowerCase().includes("accepted") ||
                                     String(status) === "10" || // LeetCode sometimes uses status codes
-                                    String(latestSubmission.statusCode) === "10";
+                                    String(latestSubmission.statusCode) === "10" ||
+                                    latestSubmission.statusCode === 10 ||
+                                    latestSubmission.status_code === 10;
                   if (isAccepted && !winner) {
                     console.log(`[War Check] 🏆 Winner found: ${username} with Accepted submission!`);
                     winner = username;
@@ -1354,10 +1493,15 @@ export default function App() {
                 } else {
                   console.log(`[War Check] ${username} submission not newer (existing: ${new Date(existingSubmission.time).toISOString()}, new: ${new Date(latestTime).toISOString()})`);
                 }
-              } else if (currentWar.problemSlug) {
-                // Debug: Log if we couldn't find a match (for troubleshooting)
+              } else if (submissionCount === 0 && currentWar.problemSlug) {
+                // No matching submissions found - log for debugging
                 console.log(`[War Check] ⚠️ No match found for ${username} with problem slug: ${currentWar.problemSlug} during war (started at ${new Date(currentWar.startTime).toISOString()})`);
-                console.log(`[War Check] Available submissions:`, submission.slice(0, 3).map(s => ({ title: s.title, titleSlug: s.titleSlug, time: new Date(parseInt(s.timestamp || "0", 10) * 1000).toISOString() })));
+                console.log(`[War Check] Available submissions (first 3):`, submission.slice(0, 3).map(s => ({ 
+                  title: s.title, 
+                  titleSlug: s.titleSlug, 
+                  time: new Date(parseInt(s.timestamp || "0", 10) * 1000).toISOString(),
+                  status: s.statusDisplay || s.status || s.statusCode
+                })));
               }
             }
           } catch (e) {
@@ -1396,14 +1540,17 @@ export default function App() {
         console.log(`[War Check] Updated counts:`, updatedCounts);
         
         // Always update to ensure UI is in sync, even if no changes detected
+        // Force update by always setting state (React will handle deduplication)
         setWarSubmissions(updatedSubmissions);
         
         // Use functional update to merge with latest state
+        // Always update even if no changes detected to ensure UI sync
         setWarState(prevWar => {
           if (!prevWar || prevWar.problemSlug !== currentWar.problemSlug) {
             return prevWar; // Don't update if war changed
           }
           
+          // Always create a new object to force React to detect the update
           const updatedWar = { 
             ...prevWar, 
             submissions: updatedSubmissions,
@@ -1462,7 +1609,8 @@ export default function App() {
 
   // Timer effect
   useEffect(() => {
-    if (!warState || !warState.active || warState.winner) {
+    // Stop timer if war is not active, has winner, or is cancelled
+    if (!warState || !warState.active || warState.winner || warState.cancelled) {
       setWarTimer(0);
       return;
     }
