@@ -33,7 +33,7 @@ import {
 // Firebase (avoid duplicate init)
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "firebase/auth";
-import { getFirestore, doc, setDoc, onSnapshot, getDoc } from "firebase/firestore";
+import { getFirestore, doc, setDoc, onSnapshot, getDoc, deleteField } from "firebase/firestore";
 
 /**
  * ========== CONFIGURATION ==========
@@ -276,9 +276,21 @@ export default function App() {
       return;
     }
     try {
-      // Ensure we have the room ID in the data
-      const dataToSave = { ...roomData, id: currentRoomId };
-      await setDoc(doc(db, SHARED_ROOM_PATH), dataToSave, { merge: true });
+      // If roomData.war is null, we need to remove the war field
+      if (roomData.war === null) {
+        // Get current data first
+        const docRef = doc(db, SHARED_ROOM_PATH);
+        const currentDoc = await getDoc(docRef);
+        if (currentDoc.exists()) {
+          const currentData = currentDoc.data();
+          // Remove war field using deleteField()
+          await setDoc(docRef, { ...currentData, war: deleteField() }, { merge: true });
+        }
+      } else {
+        // Ensure we have the room ID in the data
+        const dataToSave = { ...roomData, id: currentRoomId };
+        await setDoc(doc(db, SHARED_ROOM_PATH), dataToSave, { merge: true });
+      }
     } catch (e) {
       console.error("saveSharedRoom error:", e);
       setError("Failed to save room data.");
@@ -323,19 +335,30 @@ export default function App() {
       if (snap.exists()) {
       const data = snap.data();
         if (data?.rooms && Array.isArray(data.rooms) && data.rooms.length > 0) {
-          setRooms(data.rooms);
-          // Ensure current room exists
-          const currentExists = data.rooms.find(r => r.id === currentRoomId);
-          if (!currentExists && data.rooms.length > 0) {
-            setCurrentRoomId(data.rooms[0].id);
-          }
+          // Only update if rooms actually changed to prevent unnecessary re-renders
+          setRooms(prevRooms => {
+            const newRoomsStr = JSON.stringify(data.rooms);
+            const prevRoomsStr = JSON.stringify(prevRooms);
+            if (newRoomsStr !== prevRoomsStr) {
+              return data.rooms;
+            }
+            return prevRooms;
+          });
+          // Ensure current room exists (use functional update to avoid dependency)
+          setCurrentRoomId(prevRoomId => {
+            const currentExists = data.rooms.find(r => r.id === prevRoomId);
+            if (!currentExists && data.rooms.length > 0) {
+              return data.rooms[0].id;
+            }
+            return prevRoomId;
+          });
         }
       }
     }, (err) => {
       console.error("Firestore rooms snapshot error", err);
     });
     return () => unsub();
-  }, [db, currentUserId, currentRoomId, USER_ROOMS_PATH]);
+  }, [db, currentUserId, USER_ROOMS_PATH]); // Removed currentRoomId to prevent re-subscription loops
 
   // Load shared room data from Firebase (room-specific data)
   // Use ref to prevent infinite loops from writing back to Firebase
@@ -494,7 +517,7 @@ export default function App() {
       console.error("Firestore shared room snapshot error", err);
     });
     return () => unsub();
-  }, [db, SHARED_ROOM_PATH, currentRoomId, currentLeetCodeUsername]);
+  }, [db, SHARED_ROOM_PATH, currentRoomId, currentLeetCodeUsername]); // Re-run when room or username changes
 
   // Get current room usernames
   const currentRoomUsernames = useMemo(() => {
@@ -1295,6 +1318,21 @@ export default function App() {
     playBeep();
   };
 
+  // Clear/dismiss war card
+  const clearWar = async () => {
+    if (!warState) return;
+    
+    // Clear war from Firebase
+    console.log("[War Clear] Clearing war state");
+    await saveSharedRoom({ war: null });
+    
+    // Clear local state
+    setWarState(null);
+    setWarSubmissions({});
+    setWarTimer(0);
+    playBeep();
+  };
+
   // Check for winner by polling submissions for the specific problem
   useEffect(() => {
     // Stop checking if war is not active, has a winner, is cancelled, or missing problem slug
@@ -1544,7 +1582,7 @@ export default function App() {
         setWarSubmissions(updatedSubmissions);
         
         // Use functional update to merge with latest state
-        // Always update even if no changes detected to ensure UI sync
+        // Only save to Firebase if there are actual changes to reduce database calls
         setWarState(prevWar => {
           if (!prevWar || prevWar.problemSlug !== currentWar.problemSlug) {
             return prevWar; // Don't update if war changed
@@ -1561,7 +1599,7 @@ export default function App() {
             console.log(`[War Check] 🎉 War ended! Winner: ${winner}`);
             updatedWar.active = false;
             updatedWar.winner = winner;
-            // Save to Firebase and update state
+            // Save to Firebase and update state (only when winner is found)
             saveSharedRoom({ war: updatedWar }).then(() => {
               setWarState(updatedWar);
               if (checkInterval) clearInterval(checkInterval);
@@ -1570,10 +1608,13 @@ export default function App() {
             });
             return updatedWar;
           } else {
-            // Update submissions without ending war - save to Firebase
-            saveSharedRoom({ war: updatedWar }).then(() => {
-              console.log(`[War Check] War state updated in Firebase`);
-            });
+            // Only save to Firebase if submissions or counts actually changed
+            // This prevents excessive database writes
+            if (submissionsChanged || countsChanged) {
+              saveSharedRoom({ war: updatedWar }).then(() => {
+                console.log(`[War Check] War state updated in Firebase (changes detected)`);
+              });
+            }
             // Update ref immediately
             warStateRef.current = updatedWar;
             return updatedWar;
@@ -1621,10 +1662,13 @@ export default function App() {
       setWarTimer(remaining);
       
       if (remaining === 0 && warState.active) {
-        // War ended without winner
+        // War ended without winner - only save once
         const updatedWar = { ...warState, active: false };
-        saveSharedRoom({ war: updatedWar });
-        setWarState(updatedWar);
+        // Use a flag to prevent multiple saves
+        if (!warState.ended) {
+          saveSharedRoom({ war: { ...updatedWar, ended: true } });
+          setWarState({ ...updatedWar, ended: true });
+        }
       }
     };
     
@@ -2330,25 +2374,46 @@ export default function App() {
                   </div>
                 )}
               </div>
-            ) : warState && warState.winner ? (
+            ) : warState && (warState.winner || warState.cancelled || !warState.active) ? (
               <div className="war-card">
-                <div className="war-header">
+                <div className="war-header" style={{ justifyContent: "space-between" }}>
                   <div className="war-title">
-                    <Award className="icon" style={{ width: 24, height: 24 }} />
-                    War Ended
+                    {warState.winner ? (
+                      <>
+                        <Award className="icon" style={{ width: 24, height: 24 }} />
+                        War Ended
+                      </>
+                    ) : (
+                      <>
+                        <Sword className="icon" style={{ width: 24, height: 24 }} />
+                        War Cancelled
+                      </>
+                    )}
                   </div>
+                  <button 
+                    className="stop-war-btn" 
+                    onClick={clearWar}
+                    title="Close war card"
+                    style={{ cursor: "pointer" }}
+                  >
+                    <X className="icon" style={{ width: 14, height: 14 }} />
+                  </button>
                 </div>
-                <div className="war-winner">
-                  <Crown className="icon" style={{ width: 32, height: 32, color: "#d97706" }} />
-                  <div>
-                    <div className="war-status">Winner</div>
-                    <div className="war-winner-name">{warState.winner}</div>
+                {warState.winner && (
+                  <div className="war-winner">
+                    <Crown className="icon" style={{ width: 32, height: 32, color: "#d97706" }} />
+                    <div>
+                      <div className="war-status">Winner</div>
+                      <div className="war-winner-name">{warState.winner}</div>
+                    </div>
                   </div>
-                </div>
-                <a href={warState.problemLink} target="_blank" rel="noopener noreferrer" className="war-problem-link" style={{ marginTop: 16 }}>
-                  <Target className="icon" style={{ width: 18, height: 18 }} />
-                  View Problem
-                </a>
+                )}
+                {warState.problemLink && (
+                  <a href={warState.problemLink} target="_blank" rel="noopener noreferrer" className="war-problem-link" style={{ marginTop: 16 }}>
+                    <Target className="icon" style={{ width: 18, height: 18 }} />
+                    View Problem
+                  </a>
+                )}
               </div>
             ) : (
               <div className="card" style={{ marginBottom: 20 }}>
