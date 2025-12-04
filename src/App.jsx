@@ -305,7 +305,8 @@ export default function App() {
         let usernames = [...(data?.usernames || [])];
         
         // Ensure current user is always in the room (persist on refresh)
-        if (currentUsername && !usernames.includes(currentUsername)) {
+        // BUT: Don't auto-add to default room - user must explicitly join
+        if (currentUsername && !usernames.includes(currentUsername) && currentRoomId !== "default") {
           usernames.push(currentUsername);
           // Update Firebase to include current user
           try {
@@ -367,9 +368,11 @@ export default function App() {
           const roomIndex = prev.findIndex(r => r.id === currentRoomId);
           if (roomIndex >= 0) {
             const updated = [...prev];
+            // Prioritize Firebase name, then existing local name, then fallback
+            const roomName = data.name || updated[roomIndex].name || (currentRoomId === "default" ? "Default Room" : `Room ${currentRoomId.substring(0, 8)}`);
             updated[roomIndex] = {
               ...updated[roomIndex],
-              name: data.name || updated[roomIndex].name || (currentRoomId === "default" ? "Default Room" : `Room ${currentRoomId.substring(0, 8)}`),
+              name: roomName,
               usernames: usernames
             };
             return updated;
@@ -385,11 +388,12 @@ export default function App() {
         });
       } else {
         // Room doesn't exist in Firebase yet - initialize it
+        // BUT: Don't auto-add username to default room
         const currentUsername = localStorage.getItem("lb_leetcodeUsername");
         const roomData = {
           id: currentRoomId,
           name: currentRoomId === "default" ? "Default Room" : `Room ${currentRoomId.substring(0, 8)}`,
-          usernames: currentUsername ? [currentUsername] : []
+          usernames: (currentUsername && currentRoomId !== "default") ? [currentUsername] : []
         };
         setDoc(docRef, roomData, { merge: true }).catch(e => {
           console.error("Error initializing room:", e);
@@ -646,7 +650,8 @@ export default function App() {
           let updatedUsernames = [...(sharedRoom.usernames || [])];
           
           // Add current user to room if they have a username and aren't already in the room
-          if (currentUsername && !updatedUsernames.includes(currentUsername)) {
+          // BUT: Don't auto-add to default room - user must explicitly join
+          if (currentUsername && !updatedUsernames.includes(currentUsername) && roomId !== "default") {
             updatedUsernames.push(currentUsername);
             // Update Firebase with new username directly
             const roomPath = typeof __app_id !== "undefined"
@@ -673,6 +678,7 @@ export default function App() {
               return newRooms;
             } else {
               // Update existing room with latest data from Firebase
+              // Prioritize Firebase name, then existing local name, then fallback
               const updated = prev.map(r => 
                 r.id === roomId 
                   ? {
@@ -694,10 +700,11 @@ export default function App() {
           window.history.replaceState({}, "", newUrl);
         } else {
           // Room doesn't exist in Firebase - create it
+          // BUT: Don't auto-add username to default room
           const newRoom = {
             id: roomId,
             name: roomId === "default" ? "Default Room" : `Room ${roomId.substring(0, 8)}`,
-            usernames: currentUsername ? [currentUsername] : []
+            usernames: (currentUsername && roomId !== "default") ? [currentUsername] : []
           };
           
           // Save to Firebase
@@ -833,7 +840,7 @@ export default function App() {
         if (!exists) {
           const newRooms = [...prev, {
             id: normalizedId,
-            name: existingRoom.name || name,
+            name: existingRoom.name || name, // Use Firebase name if available, otherwise use provided name
             usernames: existingRoom.usernames || []
           }];
           saveUserRooms(newRooms);
@@ -853,7 +860,7 @@ export default function App() {
             : `rooms/${normalizedId}`;
           await setDoc(doc(db, roomPath), {
             id: normalizedId,
-            name: existingRoom.name || name,
+            name: existingRoom.name || name, // Preserve Firebase name if it exists
             usernames: updatedUsernames
           }, { merge: true });
           setFriendUsernames(updatedUsernames);
@@ -873,12 +880,15 @@ export default function App() {
       name,
       usernames: username ? [username] : []
     };
-    // Save to shared collection first (with explicit name and usernames)
-    await saveSharedRoom({ 
-      id: newRoom.id,
-      name: newRoom.name,
+    // Save to shared room collection directly (with explicit name and usernames)
+    const roomPath = typeof __app_id !== "undefined"
+      ? `/artifacts/${appId}/rooms/${normalizedId}`
+      : `rooms/${normalizedId}`;
+    await setDoc(doc(db, roomPath), {
+      id: normalizedId,
+      name: name, // Always use the provided name
       usernames: newRoom.usernames 
-    });
+    }, { merge: true });
     // Then add to user's local list
     const updatedRooms = [...rooms, newRoom];
     await saveUserRooms(updatedRooms);
@@ -1875,7 +1885,7 @@ export default function App() {
               </div>
               <div className="current-user-info">
                 <div className="current-user-label">You</div>
-                <div className="current-user-id">{shortUserId}</div>
+                <div className="current-user-id">{currentLeetCodeUsername || shortUserId}</div>
               </div>
             </div>
           )}
