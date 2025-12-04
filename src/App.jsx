@@ -1,5 +1,5 @@
 // App.jsx
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Loader2,
   Zap,
@@ -200,10 +200,11 @@ export default function App() {
      Load and save rooms
      --------------------------- */
   
-  // Restore session on mount if user has joined before
+  // Restore session on mount if user has joined before (only run once)
+  const hasRestoredRef = useRef(false);
   useEffect(() => {
-    // Wait for Firebase to be initialized
-    if (!db) return;
+    // Wait for Firebase to be initialized and only run once
+    if (!db || hasRestoredRef.current) return;
     
     const savedUsername = localStorage.getItem("lb_leetcodeUsername");
     const savedRoomId = localStorage.getItem("lb_currentRoom");
@@ -227,14 +228,16 @@ export default function App() {
       }
       
       // Restore current room (already set in useState initializer, but ensure it's set)
-      if (savedRoomId) {
+      if (savedRoomId && !currentRoomId) {
         setCurrentRoomId(savedRoomId);
       }
       
       // Hide initial setup since user has joined before
       setShowInitialSetup(false);
     }
-  }, [db, currentRoomId]); // Run when Firebase is ready
+    
+    hasRestoredRef.current = true;
+  }, [db]); // Only run when Firebase is ready, use ref to prevent re-running
   
   useEffect(() => {
     if (rooms.length > 0) {
