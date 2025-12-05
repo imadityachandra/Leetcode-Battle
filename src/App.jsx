@@ -1469,35 +1469,53 @@ export default function App() {
                 
                 // Try multiple ways to match the problem
                 const problemTitle = (sub.title || "").toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
-                const problemSlug = currentWar.problemSlug.toLowerCase();
-                const titleSlug = (sub.titleSlug || "").toLowerCase();
+                const problemSlug = currentWar.problemSlug.toLowerCase().trim();
+                const titleSlug = (sub.titleSlug || "").toLowerCase().trim();
                 const titleNormalized = (sub.title || "").toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, "-");
                 const titleWords = (sub.title || "").toLowerCase().split(/\s+/);
-                const slugWords = problemSlug.split("-");
+                const slugWords = problemSlug.split("-").filter(w => w.length > 0);
                 
                 // More flexible matching - check if problem slug matches in various ways
-                const slugMatch = titleSlug === problemSlug || 
-                                 problemTitle === problemSlug ||
-                                 titleSlug.includes(problemSlug) ||
-                                 problemSlug.includes(titleSlug) ||
-                                 problemTitle.includes(problemSlug) || 
-                                 problemSlug.includes(problemTitle) ||
-                                 titleNormalized.includes(problemSlug) ||
-                                 problemSlug.includes(titleNormalized) ||
-                                 (sub.title && sub.title.toLowerCase().includes(problemSlug.replace(/-/g, " "))) ||
-                                 (sub.titleSlug && sub.titleSlug.toLowerCase() === problemSlug) ||
-                                 (sub.title && slugWords.length > 0 && slugWords.every(word => word.length > 2 && sub.title.toLowerCase().includes(word))) ||
-                                 (sub.titleSlug && sub.titleSlug.toLowerCase().includes(problemSlug)) ||
-                                 (problemSlug && sub.titleSlug && sub.titleSlug.toLowerCase().includes(problemSlug.split("-")[0]));
+                const slugMatch = 
+                  // Exact matches
+                  titleSlug === problemSlug ||
+                  problemTitle === problemSlug ||
+                  // Contains matches (more lenient)
+                  (titleSlug && problemSlug && titleSlug.includes(problemSlug)) ||
+                  (problemSlug && titleSlug && problemSlug.includes(titleSlug)) ||
+                  (problemTitle && problemSlug && problemTitle.includes(problemSlug)) || 
+                  (problemSlug && problemTitle && problemSlug.includes(problemTitle)) ||
+                  (titleNormalized && problemSlug && titleNormalized.includes(problemSlug)) ||
+                  (problemSlug && titleNormalized && problemSlug.includes(titleNormalized)) ||
+                  // Title contains slug words
+                  (sub.title && problemSlug && sub.title.toLowerCase().includes(problemSlug.replace(/-/g, " "))) ||
+                  // Reverse: slug contains title words
+                  (sub.title && slugWords.length > 0 && slugWords.every(word => word.length > 2 && sub.title.toLowerCase().includes(word))) ||
+                  // Partial slug match (first word)
+                  (problemSlug && sub.titleSlug && sub.titleSlug.toLowerCase().includes(problemSlug.split("-")[0])) ||
+                  // Check if titleSlug ends with problemSlug or vice versa
+                  (titleSlug && problemSlug && (titleSlug.endsWith(problemSlug) || problemSlug.endsWith(titleSlug)));
+                
+                // Log all submissions during war for debugging
+                if (submissionTime >= currentWar.startTime) {
+                  console.log(`[War Check] Checking match for ${username}:`, {
+                    problemSlug: currentWar.problemSlug,
+                    titleSlug: sub.titleSlug,
+                    title: sub.title,
+                    slugMatch: slugMatch,
+                    status: sub.statusDisplay || sub.status || sub.statusCode
+                  });
+                }
                 
                 if (slugMatch) {
                   submissionCount++;
-                  console.log(`[War Check] ✓ Match found for ${username}: ${sub.title || sub.titleSlug} - Status: ${sub.statusDisplay || sub.status || sub.statusCode}`);
+                  console.log(`[War Check] ✓✓✓ MATCH FOUND for ${username}: ${sub.title || sub.titleSlug} - Status: ${sub.statusDisplay || sub.status || sub.statusCode} - Time: ${new Date(submissionTime).toISOString()}`);
                   
                   // Track the latest submission
                   if (submissionTime > latestTime) {
                     latestTime = submissionTime;
                     latestSubmission = sub;
+                    console.log(`[War Check] Updated latest submission for ${username} at ${new Date(latestTime).toISOString()}`);
                   }
                 }
               }
@@ -1605,16 +1623,19 @@ export default function App() {
         const submissionsChanged = JSON.stringify(updatedSubmissions) !== JSON.stringify(currentWar.submissions || {});
         const countsChanged = JSON.stringify(updatedCounts) !== JSON.stringify(currentWar.submissionCounts || {});
         
+        console.log(`[War Check] ===== SUMMARY =====`);
         console.log(`[War Check] hasUpdates: ${hasUpdates}, submissionsChanged: ${submissionsChanged}, countsChanged: ${countsChanged}`);
-        console.log(`[War Check] Updated submissions:`, updatedSubmissions);
-        console.log(`[War Check] Updated counts:`, updatedCounts);
+        console.log(`[War Check] Winner: ${winner || "None yet"}`);
+        console.log(`[War Check] Updated submissions:`, JSON.stringify(updatedSubmissions, null, 2));
+        console.log(`[War Check] Updated counts:`, JSON.stringify(updatedCounts, null, 2));
+        console.log(`[War Check] ===================`);
         
         // Always update to ensure UI is in sync, even if no changes detected
         // Force update by always setting state (React will handle deduplication)
         setWarSubmissions(updatedSubmissions);
         
         // Use functional update to merge with latest state
-        // Only save to Firebase if there are actual changes to reduce database calls
+        // Always save to Firebase when there are changes to ensure sync
         setWarState(prevWar => {
           if (!prevWar || prevWar.problemSlug !== currentWar.problemSlug) {
             return prevWar; // Don't update if war changed
@@ -1628,11 +1649,12 @@ export default function App() {
           };
           
           if (winner) {
-            console.log(`[War Check] 🎉 War ended! Winner: ${winner}`);
+            console.log(`[War Check] 🎉🎉🎉 WAR ENDED! Winner: ${winner} 🎉🎉🎉`);
             updatedWar.active = false;
             updatedWar.winner = winner;
             // Save to Firebase and update state (only when winner is found)
             saveSharedRoom({ war: updatedWar }).then(() => {
+              console.log(`[War Check] Winner saved to Firebase: ${winner}`);
               setWarState(updatedWar);
               if (checkInterval) clearInterval(checkInterval);
               playBeep();
@@ -1640,11 +1662,14 @@ export default function App() {
             });
             return updatedWar;
           } else {
-            // Only save to Firebase if submissions or counts actually changed
-            // This prevents excessive database writes
-            if (submissionsChanged || countsChanged) {
+            // Save to Firebase if submissions or counts changed (or if we have updates)
+            // This ensures status updates are synced across all users
+            if (submissionsChanged || countsChanged || hasUpdates) {
+              console.log(`[War Check] Saving updates to Firebase...`);
               saveSharedRoom({ war: updatedWar }).then(() => {
-                console.log(`[War Check] War state updated in Firebase (changes detected)`);
+                console.log(`[War Check] ✓ War state saved to Firebase`);
+              }).catch(err => {
+                console.error(`[War Check] ✗ Error saving to Firebase:`, err);
               });
             }
             // Update ref immediately
