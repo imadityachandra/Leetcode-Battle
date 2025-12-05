@@ -1226,73 +1226,179 @@ export default function App() {
   /* ---------------------------
      War functionality
      --------------------------- */
-  // Get random LeetCode problem with difficulty filter
+  // Get random LeetCode problem with difficulty filter using LeetCode GraphQL API
   const getRandomProblem = async () => {
     try {
-      // Curated list of problems with difficulty levels
-      const problemsByDifficulty = {
-        easy: [
-          "two-sum", "reverse-integer", "palindrome-number", "valid-parentheses",
-          "remove-duplicates-from-sorted-array", "remove-element", "plus-one",
-          "length-of-last-word", "search-insert-position", "climbing-stairs",
-          "best-time-to-buy-and-sell-stock", "maximum-subarray", "house-robber",
-          "contains-duplicate", "missing-number", "single-number", "majority-element",
-          "happy-number", "power-of-two", "valid-anagram", "first-unique-character-in-a-string",
-          "reverse-string", "valid-palindrome", "implement-strstr", "count-and-say"
-        ],
-        medium: [
-          "add-two-numbers", "longest-substring-without-repeating-characters",
-          "container-with-most-water", "3sum", "longest-common-prefix",
-          "merge-two-sorted-lists", "remove-nth-node-from-end-of-list",
-          "swap-nodes-in-pairs", "reverse-nodes-in-k-group", "rotate-list",
-          "group-anagrams", "longest-palindromic-substring", "zigzag-conversion",
-          "string-to-integer-atoi", "find-the-index-of-the-first-occurrence-in-a-string",
-          "search-in-rotated-sorted-array", "combination-sum", "permutations",
-          "merge-intervals", "unique-paths", "minimum-path-sum", "decode-ways",
-          "word-break", "coin-change", "longest-increasing-subsequence"
-        ],
-        hard: [
-          "median-of-two-sorted-arrays", "regular-expression-matching",
-          "merge-k-sorted-lists", "reverse-nodes-in-k-group", "trapping-rain-water",
-          "wildcard-matching", "n-queens", "n-queens-ii", "sudoku-solver",
-          "first-missing-positive", "longest-valid-parentheses", "edit-distance",
-          "minimum-window-substring", "largest-rectangle-in-histogram",
-          "maximal-rectangle", "binary-tree-maximum-path-sum", "word-ladder",
-          "word-ladder-ii", "serialize-and-deserialize-binary-tree", "alien-dictionary"
-        ]
+      // Map difficulty to LeetCode's difficulty level
+      const difficultyMap = {
+        easy: "EASY",
+        medium: "MEDIUM",
+        hard: "HARD",
+        any: null // null means any difficulty
       };
       
-      // Get problems based on selected difficulty
-      let availableProblems = [];
-      if (warDifficulty === "any") {
-        availableProblems = [...problemsByDifficulty.easy, ...problemsByDifficulty.medium, ...problemsByDifficulty.hard];
-      } else {
-        availableProblems = problemsByDifficulty[warDifficulty] || problemsByDifficulty.medium;
+      const difficulty = difficultyMap[warDifficulty] || "MEDIUM";
+      
+      // LeetCode GraphQL query to fetch problems
+      const query = difficulty === null 
+        ? `query problemsetQuestionList($categorySlug: String, $limit: Int, $skip: Int, $filters: QuestionListFilterInput) {
+            problemsetQuestionList: questionList(
+              categorySlug: $categorySlug
+              limit: $limit
+              skip: $skip
+              filters: $filters
+            ) {
+              total: totalNum
+              questions: data {
+                acRate
+                difficulty
+                freqBar
+                frontendQuestionId: questionFrontendId
+                isFavor
+                paidOnly: isPaidOnly
+                status
+                title
+                titleSlug
+                topicTags {
+                  name
+                  id
+                  slug
+                }
+                hasSolution
+                hasVideoSolution
+              }
+            }
+          }`
+        : `query problemsetQuestionList($categorySlug: String, $limit: Int, $skip: Int, $filters: QuestionListFilterInput) {
+            problemsetQuestionList: questionList(
+              categorySlug: $categorySlug
+              limit: $limit
+              skip: $skip
+              filters: $filters
+            ) {
+              total: totalNum
+              questions: data {
+                acRate
+                difficulty
+                freqBar
+                frontendQuestionId: questionFrontendId
+                isFavor
+                paidOnly: isPaidOnly
+                status
+                title
+                titleSlug
+                topicTags {
+                  name
+                  id
+                  slug
+                }
+                hasSolution
+                hasVideoSolution
+              }
+            }
+          }`;
+      
+      // Fetch problems from LeetCode GraphQL API
+      // First, get total count to determine random skip value
+      const countResponse = await fetch("https://leetcode.com/graphql/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          query: query,
+          variables: {
+            categorySlug: "",
+            skip: 0,
+            limit: 1,
+            filters: difficulty === null ? {} : { difficulty: difficulty }
+          }
+        })
+      });
+      
+      if (!countResponse.ok) {
+        throw new Error(`HTTP error! status: ${countResponse.status}`);
       }
       
-      // Filter out recently used problems (last 10)
-      const recentProblems = usedProblems.slice(-10);
-      const filteredProblems = availableProblems.filter(p => !recentProblems.includes(p));
+      const countData = await countResponse.json();
+      const total = countData?.data?.problemsetQuestionList?.total || 0;
       
-      // If all problems were used recently, reset and use all problems
-      const problemsToChooseFrom = filteredProblems.length > 0 ? filteredProblems : availableProblems;
+      if (total === 0) {
+        throw new Error("No problems found for selected difficulty");
+      }
       
-      // Select random problem
+      // Get a random skip value to fetch a random problem
+      // Fetch a batch of problems and pick one randomly for better distribution
+      const batchSize = Math.min(50, total); // Fetch up to 50 problems
+      const randomSkip = Math.floor(Math.random() * Math.max(0, total - batchSize));
+      
+      const response = await fetch("https://leetcode.com/graphql/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          query: query,
+          variables: {
+            categorySlug: "",
+            skip: randomSkip,
+            limit: batchSize,
+            filters: difficulty === null ? {} : { difficulty: difficulty }
+          }
+        })
+      });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      const problems = data?.data?.problemsetQuestionList?.questions || [];
+      
+      if (problems.length === 0) {
+        throw new Error("No problems returned from API");
+      }
+      
+      // Filter out paid-only problems and select a random one
+      const freeProblems = problems.filter(p => !p.paidOnly);
+      
+      if (freeProblems.length === 0) {
+        throw new Error("No free problems available");
+      }
+      
+      // Filter out recently used problems
+      const recentProblems = usedProblems.slice(-20);
+      const availableProblems = freeProblems.filter(p => !recentProblems.includes(p.titleSlug));
+      
+      // Select random problem from available ones
+      const problemsToChooseFrom = availableProblems.length > 0 ? availableProblems : freeProblems;
       const randomIndex = Math.floor(Math.random() * problemsToChooseFrom.length);
       const selectedProblem = problemsToChooseFrom[randomIndex];
       
       // Track this problem as used
-      setUsedProblems(prev => [...prev, selectedProblem].slice(-20)); // Keep last 20
+      setUsedProblems(prev => [...prev, selectedProblem.titleSlug].slice(-20));
+      
+      console.log(`[Problem Selection] Selected random problem: ${selectedProblem.titleSlug} (${selectedProblem.difficulty}) from ${total} total problems`);
       
       return {
-        link: `https://leetcode.com/problems/${selectedProblem}/`,
-        slug: selectedProblem
+        link: `https://leetcode.com/problems/${selectedProblem.titleSlug}/`,
+        slug: selectedProblem.titleSlug,
+        title: selectedProblem.title,
+        difficulty: selectedProblem.difficulty
       };
     } catch (e) {
-      console.error("Error getting random problem:", e);
+      console.error("Error fetching random problem from LeetCode API:", e);
+      // Fallback to a popular problem if API fails
+      const fallbackProblems = {
+        easy: "two-sum",
+        medium: "add-two-numbers",
+        hard: "median-of-two-sorted-arrays",
+        any: "two-sum"
+      };
+      const fallback = fallbackProblems[warDifficulty] || "two-sum";
       return {
-        link: "https://leetcode.com/problemset/all/",
-        slug: ""
+        link: `https://leetcode.com/problems/${fallback}/`,
+        slug: fallback
       };
     }
   };
