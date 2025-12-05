@@ -1480,12 +1480,58 @@ export default function App() {
     playBeep();
   };
 
-  // Check for winner by polling submissions for the specific problem
+  // Ref to store checkSubmissions function for manual refresh
+  const checkSubmissionsRef = useRef(null);
+  const isCheckingRef = useRef(false);
+  
+  // Manual refresh function for submissions
+  const manualRefreshSubmissions = async () => {
+    if (!warState || !warState.active || warState.winner || warState.cancelled || !warState.problemSlug) {
+      setError("No active war to refresh");
+      setTimeout(() => setError(null), 2200);
+      return;
+    }
+    
+    if (isCheckingRef.current) {
+      setError("Already checking submissions, please wait...");
+      setTimeout(() => setError(null), 2200);
+      return;
+    }
+    
+    // Call the check function if available
+    if (checkSubmissionsRef.current) {
+      console.log("[Manual Refresh] Manually triggering submission check");
+      isCheckingRef.current = true;
+      setAppStatus("Checking submissions...");
+      try {
+        await checkSubmissionsRef.current();
+        setAppStatus("Submissions updated");
+        playBeep();
+      } catch (error) {
+        console.error("[Manual Refresh] Error checking submissions:", error);
+        setError(error.message || "Failed to check submissions");
+        setTimeout(() => setError(null), 3000);
+      } finally {
+        // Reset after a delay to allow the check to complete
+        setTimeout(() => {
+          isCheckingRef.current = false;
+        }, 5000);
+      }
+    } else {
+      setError("Submission checker not ready yet");
+      setTimeout(() => setError(null), 2200);
+    }
+  };
+
+  // Setup submission checker for manual refresh only (no automatic polling)
   useEffect(() => {
     // Stop checking if war is not active, has a winner, is cancelled, or missing problem slug
-    if (!warState || !warState.active || warState.winner || warState.cancelled || !warState.problemSlug) return;
+    if (!warState || !warState.active || warState.winner || warState.cancelled || !warState.problemSlug) {
+      checkSubmissionsRef.current = null;
+      return;
+    }
     
-    let checkInterval;
+    // No intervals needed - only manual refresh
     let isRateLimited = false;
     let backoffTimeout = null;
     const warStateRef = { current: warState }; // Ref to track latest warState
@@ -1496,9 +1542,9 @@ export default function App() {
     };
     updateRef();
     
-    // Track last check time to prevent too frequent checks
+    // Track last check time to prevent too frequent manual checks
     let lastCheckTime = 0;
-    const MIN_CHECK_INTERVAL = 2 * 60 * 1000; // Minimum 2 minutes between checks
+    const MIN_CHECK_INTERVAL = 30 * 1000; // Minimum 30 seconds between manual checks
     
     const checkSubmissions = async () => {
       // Skip if rate limited - wait for backoff period
@@ -1822,26 +1868,22 @@ export default function App() {
       }
     };
     
-    // Run immediately, then set interval
-    checkSubmissions();
-    // Significantly reduced frequency to avoid 429 errors: Check every 3 minutes initially, then every 10 minutes
-    let checkCount = 0;
-    checkInterval = setInterval(() => {
-      checkCount++;
-      checkSubmissions();
-      if (checkCount >= 3) { // After 3 checks (9 minutes), switch to longer interval
-        clearInterval(checkInterval);
-        checkInterval = setInterval(checkSubmissions, 10 * 60 * 1000); // Check every 10 minutes
-      }
-    }, 3 * 60 * 1000); // Check every 3 minutes initially (increased from 90 seconds to reduce rate limiting)
+    // NO AUTOMATIC POLLING - only manual refresh via button to avoid rate limiting
+    // Store check function in ref for manual refresh only
+    checkSubmissionsRef.current = checkSubmissions;
     
-    // Update ref when warState changes
-    const intervalId = setInterval(updateRef, 1000); // Update ref every second
+    // User must click "Refresh" button to check submissions - no automatic intervals
+    
+    // Update ref when warState changes (no interval needed)
+    const updateRefOnChange = () => {
+      warStateRef.current = warState;
+    };
+    updateRefOnChange();
     
     return () => {
       if (checkInterval) clearInterval(checkInterval);
       if (backoffTimeout) clearTimeout(backoffTimeout);
-      clearInterval(intervalId);
+      checkSubmissionsRef.current = null; // Clear ref on cleanup
     };
   }, [warState?.active, warState?.startTime, warState?.participants, warState?.problemSlug, warState?.winner, saveSharedRoom, fetchWithRetry, warState]);
 
@@ -2518,10 +2560,27 @@ export default function App() {
                     <Sword className="icon" style={{ width: 24, height: 24 }} />
                     War Active!
                   </div>
-                  <button className="stop-war-btn" onClick={stopWar}>
-                    <X className="icon" style={{ width: 14, height: 14 }} />
-                    Stop
-                  </button>
+                  <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                    <button 
+                      className="stop-war-btn" 
+                      onClick={manualRefreshSubmissions}
+                      title="Refresh submissions"
+                      style={{ 
+                        padding: "6px 12px",
+                        fontSize: "12px",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "4px"
+                      }}
+                    >
+                      <Loader2 className="icon" style={{ width: 12, height: 12 }} />
+                      Refresh
+                    </button>
+                    <button className="stop-war-btn" onClick={stopWar}>
+                      <X className="icon" style={{ width: 14, height: 14 }} />
+                      Stop
+                    </button>
+                  </div>
                 </div>
                 <div className="war-timer">
                   {Math.floor(warTimer / 60)}:{(warTimer % 60).toString().padStart(2, '0')}
