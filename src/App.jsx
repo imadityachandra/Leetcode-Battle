@@ -247,13 +247,13 @@ export default function App() {
   
   useEffect(() => {
     if (rooms.length > 0) {
-      localStorage.setItem("lb_rooms", JSON.stringify(rooms));
+    localStorage.setItem("lb_rooms", JSON.stringify(rooms));
     }
   }, [rooms]);
 
   useEffect(() => {
     if (currentRoomId) {
-      localStorage.setItem("lb_currentRoom", currentRoomId);
+    localStorage.setItem("lb_currentRoom", currentRoomId);
     }
   }, [currentRoomId]);
 
@@ -289,9 +289,9 @@ export default function App() {
           await setDoc(docRef, { ...currentData, war: deleteField() }, { merge: true });
         }
       } else {
-        // Ensure we have the room ID in the data
-        const dataToSave = { ...roomData, id: currentRoomId };
-        await setDoc(doc(db, SHARED_ROOM_PATH), dataToSave, { merge: true });
+      // Ensure we have the room ID in the data
+      const dataToSave = { ...roomData, id: currentRoomId };
+      await setDoc(doc(db, SHARED_ROOM_PATH), dataToSave, { merge: true });
       }
     } catch (e) {
       console.error("saveSharedRoom error:", e);
@@ -349,9 +349,9 @@ export default function App() {
           // Ensure current room exists (use functional update to avoid dependency)
           setCurrentRoomId(prevRoomId => {
             const currentExists = data.rooms.find(r => r.id === prevRoomId);
-            if (!currentExists && data.rooms.length > 0) {
+          if (!currentExists && data.rooms.length > 0) {
               return data.rooms[0].id;
-            }
+          }
             return prevRoomId;
           });
         }
@@ -774,13 +774,13 @@ export default function App() {
     const roomId = params.get("room");
     if (roomId && db) {
       // Always show join modal when joining via URL - require username entry
-      // Clear any existing room data to show clean state
-      setFriendUsernames([]);
-      setRooms([]);
-      setCurrentRoomId(null);
+        // Clear any existing room data to show clean state
+        setFriendUsernames([]);
+        setRooms([]);
+        setCurrentRoomId(null);
       setShowInitialSetup(false); // Hide initial setup if showing join modal
-      setShowJoinModal(true);
-      return;
+        setShowJoinModal(true);
+        return;
       
       // If join modal is showing, don't process room yet (wait for handleJoinRoom)
       if (showJoinModal) {
@@ -1415,10 +1415,19 @@ export default function App() {
     const warDuration = 3600; // 1 hour in seconds
     const startTime = Date.now();
     
+    // Log the problem details for debugging
+    console.log(`[War Start] Problem selected:`, {
+      slug: problem.slug,
+      title: problem.title,
+      link: problem.link,
+      difficulty: problem.difficulty
+    });
+    
     const newWarState = {
       active: true,
       problemLink: problem.link,
-      problemSlug: problem.slug,
+      problemSlug: problem.slug, // Store the exact slug from API
+      problemTitle: problem.title || "", // Also store title for better matching
       startTime,
       duration: warDuration,
       winner: null,
@@ -1573,43 +1582,56 @@ export default function App() {
                   continue; // Skip submissions before war started
                 }
                 
-                // Try multiple ways to match the problem
-                const problemTitle = (sub.title || "").toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
-                const problemSlug = currentWar.problemSlug.toLowerCase().trim();
-                const titleSlug = (sub.titleSlug || "").toLowerCase().trim();
-                const titleNormalized = (sub.title || "").toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, "-");
-                const titleWords = (sub.title || "").toLowerCase().split(/\s+/);
-                const slugWords = problemSlug.split("-").filter(w => w.length > 0);
+                // Normalize both problem slug and submission slug for comparison
+                // Remove all special characters and normalize spaces/hyphens
+                const normalizeSlug = (slug) => {
+                  if (!slug) return "";
+                  return slug.toLowerCase()
+                    .trim()
+                    .replace(/[^a-z0-9-]/g, "-")  // Replace special chars with hyphens
+                    .replace(/-+/g, "-")          // Replace multiple hyphens with single
+                    .replace(/^-|-$/g, "");        // Remove leading/trailing hyphens
+                };
                 
-                // More flexible matching - check if problem slug matches in various ways
+                const problemSlug = normalizeSlug(currentWar.problemSlug);
+                const warProblemTitle = normalizeSlug((currentWar.problemTitle || "").replace(/\s+/g, "-"));
+                const titleSlug = normalizeSlug(sub.titleSlug);
+                const submissionTitle = normalizeSlug((sub.title || "").replace(/\s+/g, "-"));
+                
+                // Try multiple ways to match the problem
                 const slugMatch = 
-                  // Exact matches
+                  // Exact matches (most reliable) - check slug to slug
                   titleSlug === problemSlug ||
-                  problemTitle === problemSlug ||
-                  // Contains matches (more lenient)
-                  (titleSlug && problemSlug && titleSlug.includes(problemSlug)) ||
-                  (problemSlug && titleSlug && problemSlug.includes(titleSlug)) ||
-                  (problemTitle && problemSlug && problemTitle.includes(problemSlug)) || 
-                  (problemSlug && problemTitle && problemSlug.includes(problemTitle)) ||
-                  (titleNormalized && problemSlug && titleNormalized.includes(problemSlug)) ||
-                  (problemSlug && titleNormalized && problemSlug.includes(titleNormalized)) ||
-                  // Title contains slug words
-                  (sub.title && problemSlug && sub.title.toLowerCase().includes(problemSlug.replace(/-/g, " "))) ||
-                  // Reverse: slug contains title words
-                  (sub.title && slugWords.length > 0 && slugWords.every(word => word.length > 2 && sub.title.toLowerCase().includes(word))) ||
-                  // Partial slug match (first word)
-                  (problemSlug && sub.titleSlug && sub.titleSlug.toLowerCase().includes(problemSlug.split("-")[0])) ||
-                  // Check if titleSlug ends with problemSlug or vice versa
-                  (titleSlug && problemSlug && (titleSlug.endsWith(problemSlug) || problemSlug.endsWith(titleSlug)));
+                  // Check if submission title matches war problem title (if we have it)
+                  (warProblemTitle && submissionTitle && (warProblemTitle === submissionTitle || warProblemTitle.includes(submissionTitle) || submissionTitle.includes(warProblemTitle))) ||
+                  // Title slug contains problem slug or vice versa
+                  (titleSlug && problemSlug && (titleSlug.includes(problemSlug) || problemSlug.includes(titleSlug))) ||
+                  // Submission title matches problem slug
+                  (submissionTitle && problemSlug && (submissionTitle.includes(problemSlug) || problemSlug.includes(submissionTitle))) ||
+                  // Check if they share significant words (at least 2 words match)
+                  (() => {
+                    const slugWords = problemSlug.split("-").filter(w => w.length > 2);
+                    const titleWords = titleSlug.split("-").filter(w => w.length > 2);
+                    if (slugWords.length === 0 || titleWords.length === 0) return false;
+                    const matchingWords = slugWords.filter(word => titleWords.includes(word));
+                    return matchingWords.length >= Math.min(2, Math.min(slugWords.length, titleWords.length));
+                  })();
                 
                 // Log all submissions during war for debugging
                 if (submissionTime >= currentWar.startTime) {
-                  console.log(`[War Check] Checking match for ${username}:`, {
-                    problemSlug: currentWar.problemSlug,
-                    titleSlug: sub.titleSlug,
-                    title: sub.title,
+                  console.log(`[War Check] 🔍 Checking match for ${username}:`, {
+                    originalProblemSlug: currentWar.problemSlug,
+                    normalizedProblemSlug: problemSlug,
+                    warProblemTitle: currentWar.problemTitle,
+                    normalizedWarTitle: warProblemTitle,
+                    submissionTitleSlug: sub.titleSlug,
+                    normalizedTitleSlug: titleSlug,
+                    submissionTitle: sub.title,
+                    normalizedSubmissionTitle: submissionTitle,
                     slugMatch: slugMatch,
-                    status: sub.statusDisplay || sub.status || sub.statusCode
+                    status: sub.statusDisplay || sub.status || sub.statusCode,
+                    statusCode: sub.statusCode,
+                    timestamp: new Date(submissionTime).toISOString()
                   });
                 }
                 
@@ -1772,11 +1794,11 @@ export default function App() {
             // This ensures status updates are synced across all users
             if (submissionsChanged || countsChanged || hasUpdates) {
               console.log(`[War Check] Saving updates to Firebase...`);
-              saveSharedRoom({ war: updatedWar }).then(() => {
+            saveSharedRoom({ war: updatedWar }).then(() => {
                 console.log(`[War Check] ✓ War state saved to Firebase`);
               }).catch(err => {
                 console.error(`[War Check] ✗ Error saving to Firebase:`, err);
-              });
+            });
             }
             // Update ref immediately
             warStateRef.current = updatedWar;
@@ -2543,8 +2565,8 @@ export default function App() {
                   <div className="war-title">
                     {warState.winner ? (
                       <>
-                        <Award className="icon" style={{ width: 24, height: 24 }} />
-                        War Ended
+                    <Award className="icon" style={{ width: 24, height: 24 }} />
+                    War Ended
                       </>
                     ) : (
                       <>
@@ -2563,19 +2585,19 @@ export default function App() {
                   </button>
                 </div>
                 {warState.winner && (
-                  <div className="war-winner">
-                    <Crown className="icon" style={{ width: 32, height: 32, color: "#d97706" }} />
-                    <div>
-                      <div className="war-status">Winner</div>
-                      <div className="war-winner-name">{warState.winner}</div>
-                    </div>
+                <div className="war-winner">
+                  <Crown className="icon" style={{ width: 32, height: 32, color: "#d97706" }} />
+                  <div>
+                    <div className="war-status">Winner</div>
+                    <div className="war-winner-name">{warState.winner}</div>
                   </div>
+                </div>
                 )}
                 {warState.problemLink && (
-                  <a href={warState.problemLink} target="_blank" rel="noopener noreferrer" className="war-problem-link" style={{ marginTop: 16 }}>
-                    <Target className="icon" style={{ width: 18, height: 18 }} />
-                    View Problem
-                  </a>
+                <a href={warState.problemLink} target="_blank" rel="noopener noreferrer" className="war-problem-link" style={{ marginTop: 16 }}>
+                  <Target className="icon" style={{ width: 18, height: 18 }} />
+                  View Problem
+                </a>
                 )}
               </div>
             ) : (
