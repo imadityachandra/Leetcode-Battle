@@ -27,7 +27,9 @@ import {
   Play,
   Timer,
   Target,
-  Award
+  Award,
+  MessageCircle,
+  Send
 } from "lucide-react";
 
 // Firebase (avoid duplicate init)
@@ -142,6 +144,11 @@ export default function App() {
   const [warSubmissions, setWarSubmissions] = useState({}); // { username: { status: string, time: number } }
   const [warDifficulty, setWarDifficulty] = useState("medium"); // "easy", "medium", "hard", or "any"
   const [usedProblems, setUsedProblems] = useState([]); // Track recently used problems to avoid repeats
+
+  // Chat state
+  const [messages, setMessages] = useState([]); // Array of { id, username, text, timestamp }
+  const [newMessage, setNewMessage] = useState(""); // Current message input
+  const chatMessagesEndRef = useRef(null); // Ref for auto-scrolling to bottom
 
   // Firestore doc paths
   // Shared room path - all users access the same room data
@@ -1173,6 +1180,8 @@ export default function App() {
   };
 
   const switchRoom = (roomId) => {
+    // Clear messages immediately when switching rooms
+    setMessages([]);
     setCurrentRoomId(roomId);
     playBeep();
   };
@@ -1388,6 +1397,76 @@ export default function App() {
     setWarTimer(0);
     playBeep();
   };
+
+  // Send a chat message
+  const sendMessage = useCallback(async () => {
+    if (!newMessage.trim() || !currentLeetCodeUsername || !currentRoomId || !db || !SHARED_ROOM_PATH) {
+      return;
+    }
+
+    const message = {
+      id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
+      username: currentLeetCodeUsername,
+      text: newMessage.trim(),
+      timestamp: Date.now()
+    };
+
+    try {
+      // Get current room data
+      const docRef = doc(db, SHARED_ROOM_PATH);
+      const currentDoc = await getDoc(docRef);
+      const currentData = currentDoc.exists() ? currentDoc.data() : {};
+      
+      // Get existing messages or initialize empty array
+      const existingMessages = currentData.messages || [];
+      
+      // Add new message (limit to last 100 messages to prevent document size issues)
+      const updatedMessages = [...existingMessages, message].slice(-100);
+      
+      // Save to Firebase
+      await setDoc(docRef, { messages: updatedMessages }, { merge: true });
+      
+      // Clear input
+      setNewMessage("");
+      playBeep();
+    } catch (error) {
+      console.error("Error sending message:", error);
+      setError("Failed to send message");
+      setTimeout(() => setError(null), 3000);
+    }
+  }, [newMessage, currentLeetCodeUsername, currentRoomId, db, SHARED_ROOM_PATH]);
+
+  // Listen to messages for current room
+  useEffect(() => {
+    if (!db || !SHARED_ROOM_PATH || !currentRoomId) {
+      setMessages([]);
+      return;
+    }
+
+    const docRef = doc(db, SHARED_ROOM_PATH);
+    const unsub = onSnapshot(docRef, (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        const roomMessages = data.messages || [];
+        // Ensure messages are sorted by timestamp
+        const sortedMessages = [...roomMessages].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+        setMessages(sortedMessages);
+      } else {
+        setMessages([]);
+      }
+    }, (err) => {
+      console.error("Firestore messages snapshot error", err);
+    });
+
+    return () => unsub();
+  }, [db, SHARED_ROOM_PATH, currentRoomId]);
+
+  // Auto-scroll chat to bottom when new messages arrive
+  useEffect(() => {
+    if (chatMessagesEndRef.current) {
+      chatMessagesEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [messages]);
 
   // Ref to store checkSubmissions function for manual refresh
   const checkSubmissionsRef = useRef(null);
@@ -2185,6 +2264,28 @@ export default function App() {
         .modal-btn-primary { background:linear-gradient(90deg,#06b6d4,#7c3aed); color:white; }
         .modal-btn-secondary { background:var(--card); color:var(--text); border:1px solid var(--border); }
 
+        /* chat styles */
+        .chat-card { display: flex; flex-direction: column; }
+        .chat-messages { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+        .chat-messages::-webkit-scrollbar { width: 6px; }
+        .chat-messages::-webkit-scrollbar-track { background: transparent; }
+        .chat-messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+        .chat-messages::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+        .chat-message { transition: transform 0.2s ease, box-shadow 0.2s ease; }
+        .chat-message:hover { transform: translateY(-1px); box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        .chat-message-own { background: linear-gradient(135deg, #e0f2fe, #dbeafe) !important; }
+        [data-theme="dark"] .chat-message-own { background: linear-gradient(135deg, #1e3a8a, #1e40af) !important; }
+        [data-theme="neon"] .chat-message-own { background: linear-gradient(135deg, #312e81, #4c1d95) !important; box-shadow: 0 0 10px rgba(139, 92, 246, 0.3); }
+        .chat-input-form { display: flex; gap: 8px; }
+        .chat-input { flex: 1; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--text); font-size: 14px; transition: border-color 0.2s ease; }
+        .chat-input:focus { outline: none; border-color: #06b6d4; }
+        .chat-send-btn { padding: 10px 16px; border-radius: 8px; border: 0; background: linear-gradient(90deg,#06b6d4,#7c3aed); color: white; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: transform 0.2s ease, box-shadow 0.2s ease; }
+        .chat-send-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(6, 182, 212, 0.4); }
+        .chat-send-btn:active:not(:disabled) { transform: translateY(0); }
+        .chat-send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        [data-theme="neon"] .chat-send-btn { background: linear-gradient(90deg,#3b82f6,#8b5cf6); box-shadow: 0 4px 15px rgba(139,92,246,0.4); }
+        [data-theme="neon"] .chat-send-btn:hover:not(:disabled) { box-shadow: 0 6px 20px rgba(139,92,246,0.6); }
+
         /* responsive tweaks */
         @media(max-width: 640px) {
           .header { flex-direction:column; align-items:flex-start; gap:10px; }
@@ -2195,6 +2296,7 @@ export default function App() {
           .current-user { order: -1; width: 100%; }
           .footer-top { flex-direction: column; align-items: stretch; }
           .footer-top button { width: 100%; justify-content: center; }
+          .chat-messages { max-height: 200px; }
         }
       `}</style>
 
@@ -2456,6 +2558,141 @@ export default function App() {
                   </div>
                 </div>
               </div>
+            </div>
+
+            <div style={{ height: 12 }} />
+
+            {/* Chat Component */}
+            <div className="card chat-card">
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <MessageCircle className="icon" style={{ width: 18, height: 18 }} />
+                  <h3 style={{ margin: 0 }}>Room Chat</h3>
+                </div>
+                <div className="mini" style={{ fontSize: "11px", color: "var(--muted)" }}>
+                  {messages.length} {messages.length === 1 ? "message" : "messages"}
+                </div>
+              </div>
+
+              {/* Messages List */}
+              <div className="chat-messages" style={{ 
+                maxHeight: "300px", 
+                overflowY: "auto", 
+                marginBottom: 12,
+                padding: "8px",
+                borderRadius: "8px",
+                background: "var(--card)",
+                border: "1px solid var(--border)"
+              }}>
+                {messages.length === 0 ? (
+                  <div style={{ 
+                    textAlign: "center", 
+                    padding: "20px", 
+                    color: "var(--muted)",
+                    fontSize: "13px"
+                  }}>
+                    No messages yet. Start the conversation!
+                  </div>
+                ) : (
+                  messages.map((msg) => {
+                    const isCurrentUser = msg.username === currentLeetCodeUsername;
+                    const messageDate = new Date(msg.timestamp);
+                    const timeStr = messageDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                    
+                    return (
+                      <div 
+                        key={msg.id} 
+                        className={`chat-message ${isCurrentUser ? "chat-message-own" : ""}`}
+                        style={{
+                          marginBottom: "12px",
+                          padding: "8px 12px",
+                          borderRadius: "8px",
+                          background: isCurrentUser ? "var(--sky-50)" : "var(--card)",
+                          border: `1px solid ${isCurrentUser ? "var(--sky-200)" : "var(--border)"}`,
+                          maxWidth: "85%",
+                          marginLeft: isCurrentUser ? "auto" : "0",
+                          marginRight: isCurrentUser ? "0" : "auto"
+                        }}
+                      >
+                        {!isCurrentUser && (
+                          <div style={{ 
+                            fontSize: "11px", 
+                            fontWeight: 700, 
+                            color: "var(--text)",
+                            marginBottom: "4px"
+                          }}>
+                            {msg.username}
+                          </div>
+                        )}
+                        <div style={{ 
+                          fontSize: "14px", 
+                          color: "var(--text)",
+                          wordBreak: "break-word"
+                        }}>
+                          {msg.text}
+                        </div>
+                        <div style={{ 
+                          fontSize: "10px", 
+                          color: "var(--muted)", 
+                          marginTop: "4px",
+                          textAlign: isCurrentUser ? "right" : "left"
+                        }}>
+                          {timeStr}
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+                <div ref={chatMessagesEndRef} />
+              </div>
+
+              {/* Message Input */}
+              <form 
+                className="chat-input-form"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  sendMessage();
+                }}
+                style={{ display: "flex", gap: "8px" }}
+              >
+                <input
+                  type="text"
+                  className="chat-input"
+                  placeholder="Type a message..."
+                  value={newMessage}
+                  onChange={(e) => setNewMessage(e.target.value)}
+                  style={{
+                    flex: 1,
+                    padding: "10px 12px",
+                    borderRadius: "8px",
+                    border: "1px solid var(--border)",
+                    background: "var(--card)",
+                    color: "var(--text)",
+                    fontSize: "14px"
+                  }}
+                />
+                <button
+                  type="submit"
+                  className="chat-send-btn"
+                  disabled={!newMessage.trim()}
+                  style={{
+                    padding: "10px 16px",
+                    borderRadius: "8px",
+                    border: "0",
+                    background: newMessage.trim() 
+                      ? "linear-gradient(90deg,#06b6d4,#7c3aed)" 
+                      : "var(--border)",
+                    color: newMessage.trim() ? "white" : "var(--muted)",
+                    cursor: newMessage.trim() ? "pointer" : "not-allowed",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    transition: "all 0.2s ease"
+                  }}
+                >
+                  <Send className="icon" style={{ width: 16, height: 16 }} />
+                </button>
+              </form>
             </div>
           </div>
 
