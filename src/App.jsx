@@ -1496,12 +1496,24 @@ export default function App() {
     };
     updateRef();
     
+    // Track last check time to prevent too frequent checks
+    let lastCheckTime = 0;
+    const MIN_CHECK_INTERVAL = 2 * 60 * 1000; // Minimum 2 minutes between checks
+    
     const checkSubmissions = async () => {
       // Skip if rate limited - wait for backoff period
       if (isRateLimited) {
-        console.log("Skipping check - rate limited, waiting...");
+        console.log("[War Check] Skipping check - rate limited, waiting...");
         return;
       }
+      
+      // Prevent checks too close together (additional safety)
+      const now = Date.now();
+      if (now - lastCheckTime < MIN_CHECK_INTERVAL) {
+        console.log(`[War Check] Skipping check - too soon since last check (${Math.round((now - lastCheckTime) / 1000)}s ago)`);
+        return;
+      }
+      lastCheckTime = now;
       
       // Get latest warState from ref to avoid stale closure
       const currentWar = warStateRef.current;
@@ -1529,9 +1541,9 @@ export default function App() {
         for (let index = 0; index < currentWar.participants.length; index++) {
           const username = currentWar.participants[index];
           
-          // Longer delay between requests (2 seconds per user)
+          // Longer delay between requests to avoid rate limits (5 seconds per user)
           if (index > 0) {
-            await new Promise(r => setTimeout(r, 2000)); // 2 second delay between each user
+            await new Promise(r => setTimeout(r, 5000)); // 5 second delay between each user to reduce rate limiting
           }
           
           try {
@@ -1732,13 +1744,13 @@ export default function App() {
               }
               // Clear any existing backoff timeout
               if (backoffTimeout) clearTimeout(backoffTimeout);
-              // Set backoff period (10 minutes)
+              // Set backoff period (15 minutes) - longer backoff to avoid repeated rate limits
               backoffTimeout = setTimeout(() => {
                 isRateLimited = false;
                 backoffTimeout = null;
-                // Restart checking with longer interval (10 minutes after rate limit)
-                checkInterval = setInterval(checkSubmissions, 10 * 60 * 1000);
-              }, 10 * 60 * 1000); // 10 minutes backoff
+                // Restart checking with much longer interval (15 minutes after rate limit)
+                checkInterval = setInterval(checkSubmissions, 15 * 60 * 1000);
+              }, 15 * 60 * 1000); // 15 minutes backoff (increased from 10 minutes)
               break; // Stop checking other users
             } else {
               console.error(`Error checking ${username}:`, e);
@@ -1812,16 +1824,16 @@ export default function App() {
     
     // Run immediately, then set interval
     checkSubmissions();
-    // Reduced frequency to avoid 429 errors: Check every 90 seconds initially, then every 5 minutes
+    // Significantly reduced frequency to avoid 429 errors: Check every 3 minutes initially, then every 10 minutes
     let checkCount = 0;
     checkInterval = setInterval(() => {
       checkCount++;
       checkSubmissions();
-      if (checkCount >= 4) { // After 4 checks (6 minutes), switch to longer interval
+      if (checkCount >= 3) { // After 3 checks (9 minutes), switch to longer interval
         clearInterval(checkInterval);
-        checkInterval = setInterval(checkSubmissions, 5 * 60 * 1000); // Check every 5 minutes
+        checkInterval = setInterval(checkSubmissions, 10 * 60 * 1000); // Check every 10 minutes
       }
-    }, 90 * 1000); // Check every 90 seconds initially (reduced from 30 seconds)
+    }, 3 * 60 * 1000); // Check every 3 minutes initially (increased from 90 seconds to reduce rate limiting)
     
     // Update ref when warState changes
     const intervalId = setInterval(updateRef, 1000); // Update ref every second
