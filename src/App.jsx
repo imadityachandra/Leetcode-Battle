@@ -373,6 +373,7 @@ export default function App() {
   // Use ref to prevent infinite loops from writing back to Firebase
   const isUpdatingRef = useRef(false);
   const lastUpdateRef = useRef({ usernames: null, timestamp: 0 });
+  const lastRoomDataRef = useRef(null); // Track last room data to detect actual changes
   
   useEffect(() => {
     if (!db || !SHARED_ROOM_PATH || !currentRoomId) return;
@@ -389,6 +390,32 @@ export default function App() {
         console.log("[Room Sync] Skipping snapshot - update in progress");
         return;
       }
+      
+      // Check if this is just a message update (only messages field changed)
+      const currentData = snap.exists() ? snap.data() : null;
+      const lastData = lastRoomDataRef.current;
+      
+      // If only messages changed, skip processing (messages are handled by separate listener)
+      if (lastData && currentData) {
+        const lastDataWithoutMessages = { ...lastData };
+        delete lastDataWithoutMessages.messages;
+        const currentDataWithoutMessages = { ...currentData };
+        delete currentDataWithoutMessages.messages;
+        
+        const lastDataStr = JSON.stringify(lastDataWithoutMessages);
+        const currentDataStr = JSON.stringify(currentDataWithoutMessages);
+        
+        // If only messages changed, let the messages listener handle it
+        if (lastDataStr === currentDataStr && lastData.messages !== currentData.messages) {
+          console.log("[Room Sync] Only messages changed, skipping room data update");
+          // Still update the ref for next comparison
+          lastRoomDataRef.current = currentData;
+          return;
+        }
+      }
+      
+      // Update ref for next comparison
+      lastRoomDataRef.current = currentData;
       
       if (snap.exists()) {
       const data = snap.data();
@@ -434,22 +461,36 @@ export default function App() {
           }
         }
         
-        // Update friends list from shared room (always sync from Firebase)
-        setFriendUsernames(usernames);
+        // Only update friends list if it actually changed
+        setFriendUsernames(prevUsernames => {
+          const prevStr = JSON.stringify([...prevUsernames].sort());
+          const newStr = JSON.stringify([...usernames].sort());
+          if (prevStr !== newStr) {
+            return usernames;
+          }
+          return prevUsernames; // Return previous to prevent re-render
+        });
         
-        // Update war state (room-specific)
-        // Use functional update to merge with local state and avoid overwriting pending updates
+        // Update war state (room-specific) - only if war data changed
         if (data?.war) {
           setWarState(prevWar => {
             // If war is cancelled in Firebase (active: false), always use Firebase data immediately
             // This ensures cancellation syncs across all users
             if (data.war.active === false) {
-              console.log("[War Sync] War cancelled detected from Firebase, updating all users");
-              return data.war; // Always use Firebase data when war is cancelled
+              // Only update if state actually changed
+              if (!prevWar || prevWar.active !== false || prevWar.cancelled !== true) {
+                console.log("[War Sync] War cancelled detected from Firebase, updating all users");
+                return data.war;
+              }
+              return prevWar; // No change, return previous
             }
             
             // If we have a local war state and it's the same war, merge submissions
             if (prevWar && prevWar.problemSlug === data.war.problemSlug && prevWar.startTime === data.war.startTime) {
+              // Check if submissions actually changed
+              const prevSubmissionsStr = JSON.stringify(prevWar.submissions || {});
+              const newSubmissionsStr = JSON.stringify(data.war.submissions || {});
+              
               // Merge: prefer local submissions if they're newer, otherwise use Firebase
               const mergedSubmissions = { ...data.war.submissions };
               if (prevWar.submissions) {
@@ -462,42 +503,79 @@ export default function App() {
                   }
                 });
               }
+              
+              const mergedSubmissionsStr = JSON.stringify(mergedSubmissions);
+              const prevCountsStr = JSON.stringify(prevWar.submissionCounts || {});
+              const newCountsStr = JSON.stringify(data.war.submissionCounts || {});
+              
+              // Only update if something actually changed
+              if (prevSubmissionsStr !== mergedSubmissionsStr || prevCountsStr !== newCountsStr || 
+                  prevWar.active !== data.war.active || prevWar.winner !== data.war.winner) {
               return {
                 ...data.war,
                 submissions: mergedSubmissions,
                 submissionCounts: data.war.submissionCounts || prevWar.submissionCounts || {}
               };
             }
-            // New war or different war, use Firebase data
+              return prevWar; // No change, return previous
+            }
+            
+            // New war or different war - check if it's actually different
+            if (!prevWar || prevWar.problemSlug !== data.war.problemSlug || prevWar.startTime !== data.war.startTime) {
             return data.war;
+            }
+            return prevWar; // Same war, return previous
           });
           
-          // Update submissions if available (always sync from Firebase)
-          if (data.war.submissions) {
-            setWarSubmissions(data.war.submissions);
-          } else {
-            setWarSubmissions({});
-          }
+          // Update submissions only if changed
+          setWarSubmissions(prevSubmissions => {
+            const prevStr = JSON.stringify(prevSubmissions);
+            const newStr = JSON.stringify(data.war.submissions || {});
+            if (prevStr !== newStr) {
+              return data.war.submissions || {};
+            }
+            return prevSubmissions; // Return previous to prevent re-render
+          });
         } else {
-          // No war data in Firebase - clear war state
-          console.log("[War Sync] No war data in Firebase, clearing war state");
-          setWarState(null);
-          setWarSubmissions({});
+          // No war data in Firebase - only clear if we had war state
+          setWarState(prevWar => {
+            if (prevWar) {
+              console.log("[War Sync] No war data in Firebase, clearing war state");
+              return null;
+            }
+            return prevWar; // Already null, no change
+          });
+          
+          setWarSubmissions(prevSubmissions => {
+            if (Object.keys(prevSubmissions).length > 0) {
+              return {};
+            }
+            return prevSubmissions; // Already empty, no change
+          });
         }
         
-        // Update local rooms state with shared room data
+        // Update local rooms state with shared room data - only if changed
         setRooms(prev => {
           const roomIndex = prev.findIndex(r => r.id === currentRoomId);
           if (roomIndex >= 0) {
-            const updated = [...prev];
+            const existingRoom = prev[roomIndex];
             // Prioritize Firebase name, then existing local name, then fallback
-            const roomName = data.name || updated[roomIndex].name || (currentRoomId === "default" ? "Default Room" : `Room ${currentRoomId.substring(0, 8)}`);
+            const roomName = data.name || existingRoom.name || (currentRoomId === "default" ? "Default Room" : `Room ${currentRoomId.substring(0, 8)}`);
+            
+            // Check if anything actually changed
+            const nameChanged = existingRoom.name !== roomName;
+            const usernamesChanged = JSON.stringify([...existingRoom.usernames || []].sort()) !== JSON.stringify([...usernames].sort());
+            
+            if (nameChanged || usernamesChanged) {
+            const updated = [...prev];
             updated[roomIndex] = {
               ...updated[roomIndex],
-              name: roomName,
+                name: roomName,
               usernames: usernames
             };
             return updated;
+            }
+            return prev; // No change, return previous
           } else {
             // Room not in local list - add it with data from Firebase
             const newRoom = {
@@ -1323,29 +1401,37 @@ export default function App() {
 
   // Start war
   const startWar = async () => {
+    try {
     if (friendUsernames.length === 0) {
       setError("Add usernames to start a war!");
       setTimeout(() => setError(null), 2200);
       return;
     }
+      
+      // Set loading state to prevent UI issues
+      setLoading(true);
+      setAppStatus("Starting war...");
+      
+      // Set flag to prevent snapshot listener from interfering
+      isUpdatingRef.current = true;
     
     const problem = await getRandomProblem();
     const warDuration = 3600; // 1 hour in seconds
     const startTime = Date.now();
-    
-    // Log the problem details for debugging
-    console.log(`[War Start] Problem selected:`, {
-      slug: problem.slug,
-      title: problem.title,
-      link: problem.link,
-      difficulty: problem.difficulty
-    });
+      
+      // Log the problem details for debugging
+      console.log(`[War Start] Problem selected:`, {
+        slug: problem.slug,
+        title: problem.title,
+        link: problem.link,
+        difficulty: problem.difficulty
+      });
     
     const newWarState = {
       active: true,
       problemLink: problem.link,
-      problemSlug: problem.slug, // Store the exact slug from API
-      problemTitle: problem.title || "", // Also store title for better matching
+        problemSlug: problem.slug, // Store the exact slug from API
+        problemTitle: problem.title || "", // Also store title for better matching
       startTime,
       duration: warDuration,
       winner: null,
@@ -1354,12 +1440,40 @@ export default function App() {
       submissionCounts: {} // Track total submission count per user
     };
     
-    // Save to shared room (room-specific)
-    await saveSharedRoom({ war: newWarState });
+      // Update local state first for immediate UI feedback
     setWarState(newWarState);
     setWarTimer(warDuration);
     setWarSubmissions({});
+      
+      // Save to shared room (room-specific)
+      await saveSharedRoom({ war: newWarState });
+      
+      // Update the ref so snapshot listener knows about this change
+      if (lastRoomDataRef.current) {
+        lastRoomDataRef.current = { ...lastRoomDataRef.current, war: newWarState };
+      }
+      
+      setAppStatus("War started!");
     playBeep();
+      
+      // Reset flag after a delay to allow snapshot to process
+      setTimeout(() => {
+        isUpdatingRef.current = false;
+        setLoading(false);
+      }, 1000);
+    } catch (error) {
+      console.error("[War Start] Error starting war:", error);
+      setError("Failed to start war. Please try again.");
+      setTimeout(() => setError(null), 3000);
+      setLoading(false);
+      setAppStatus("Error starting war");
+      isUpdatingRef.current = false; // Reset flag on error
+      
+      // Clear any partial war state
+      setWarState(null);
+      setWarTimer(0);
+      setWarSubmissions({});
+    }
   };
 
   // Stop war
@@ -1412,6 +1526,9 @@ export default function App() {
     };
 
     try {
+      // Set flag to prevent snapshot listener from processing this update
+      isUpdatingRef.current = true;
+      
       // Get current room data
       const docRef = doc(db, SHARED_ROOM_PATH);
       const currentDoc = await getDoc(docRef);
@@ -1423,16 +1540,27 @@ export default function App() {
       // Add new message (limit to last 100 messages to prevent document size issues)
       const updatedMessages = [...existingMessages, message].slice(-100);
       
-      // Save to Firebase
+      // Save to Firebase - only update messages field to minimize snapshot triggers
       await setDoc(docRef, { messages: updatedMessages }, { merge: true });
       
-      // Clear input
+      // Update the ref so snapshot listener knows about this change
+      if (lastRoomDataRef.current) {
+        lastRoomDataRef.current = { ...lastRoomDataRef.current, messages: updatedMessages };
+      }
+      
+      // Clear input immediately for better UX
       setNewMessage("");
       playBeep();
+      
+      // Reset flag after a short delay to allow snapshot to process if needed
+      setTimeout(() => {
+        isUpdatingRef.current = false;
+      }, 500);
     } catch (error) {
       console.error("Error sending message:", error);
       setError("Failed to send message");
       setTimeout(() => setError(null), 3000);
+      isUpdatingRef.current = false; // Reset flag on error
     }
   }, [newMessage, currentLeetCodeUsername, currentRoomId, db, SHARED_ROOM_PATH]);
 
@@ -1450,9 +1578,23 @@ export default function App() {
         const roomMessages = data.messages || [];
         // Ensure messages are sorted by timestamp
         const sortedMessages = [...roomMessages].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-        setMessages(sortedMessages);
+        
+        // Only update if messages actually changed to prevent unnecessary re-renders
+        setMessages(prevMessages => {
+          const prevStr = JSON.stringify(prevMessages.map(m => ({ id: m.id, timestamp: m.timestamp })));
+          const newStr = JSON.stringify(sortedMessages.map(m => ({ id: m.id, timestamp: m.timestamp })));
+          if (prevStr !== newStr) {
+            return sortedMessages;
+          }
+          return prevMessages; // Return previous to prevent re-render
+        });
       } else {
-        setMessages([]);
+        setMessages(prevMessages => {
+          if (prevMessages.length > 0) {
+            return [];
+          }
+          return prevMessages; // Already empty, no change
+        });
       }
     }, (err) => {
       console.error("Firestore messages snapshot error", err);
