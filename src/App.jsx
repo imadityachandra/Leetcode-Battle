@@ -490,6 +490,83 @@ export default function App() {
           return prevUsernames; // Return previous to prevent re-render
         });
         
+        // Update voice call state (room-specific) - sync for all users
+        if (data?.voiceCall && data.voiceCall.active) {
+          const voiceCall = data.voiceCall;
+          const participants = voiceCall.participants || [];
+          const isUserInCall = participants.includes(currentLeetCodeUsername);
+          
+          // Always update call status and participants for all users
+          setIsCallActive(true);
+          setCallParticipants(participants);
+          
+          // If user is in the call but local state says they're not, sync it
+          if (isUserInCall && !isInCall) {
+            setIsInCall(true);
+            console.log(`[Voice] User ${currentLeetCodeUsername} is in call, syncing state`);
+          }
+          
+          // If user is not in call but local state says they are, sync it
+          if (!isUserInCall && isInCall) {
+            // User was removed from call - end their local call
+            console.log(`[Voice] User ${currentLeetCodeUsername} was removed from call`);
+            // Clean up local resources but keep UI showing call is active
+            if (localStreamRef.current) {
+              localStreamRef.current.getTracks().forEach(track => track.stop());
+              localStreamRef.current = null;
+            }
+            peerConnectionsRef.current.forEach((pc) => {
+              try {
+                pc.close();
+              } catch (e) {
+                console.error("Error closing peer connection:", e);
+              }
+            });
+            peerConnectionsRef.current.clear();
+            audioElementsRef.current.forEach((audio) => {
+              try {
+                audio.pause();
+                audio.srcObject = null;
+              } catch (e) {
+                console.error("Error cleaning up audio:", e);
+              }
+            });
+            audioElementsRef.current.clear();
+            setIsInCall(false);
+            setIsMuted(false);
+          }
+        } else {
+          // No active call - clear call state
+          if (isCallActive || isInCall) {
+            setIsCallActive(false);
+            setIsInCall(false);
+            setCallParticipants([]);
+            // Clean up resources
+            if (localStreamRef.current) {
+              localStreamRef.current.getTracks().forEach(track => track.stop());
+              localStreamRef.current = null;
+            }
+            peerConnectionsRef.current.forEach((pc) => {
+              try {
+                pc.close();
+              } catch (e) {
+                console.error("Error closing peer connection:", e);
+              }
+            });
+            peerConnectionsRef.current.clear();
+            audioElementsRef.current.forEach((audio) => {
+              try {
+                audio.pause();
+                audio.srcObject = null;
+              } catch (e) {
+                console.error("Error cleaning up audio:", e);
+              }
+            });
+            audioElementsRef.current.clear();
+            setIsMuted(false);
+          }
+        }
+        
         // Update war state (room-specific) - only if war data changed
         if (data?.war) {
           setWarState(prevWar => {
@@ -876,21 +953,23 @@ export default function App() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const roomId = params.get("room");
-    if (roomId && db) {
-      // Always show join modal when joining via URL - require username entry
-        // Clear any existing room data to show clean state
+    
+    // Only process if we have a room ID, database is ready, and we're not already in a room
+    if (roomId && db && !currentRoomId && !showJoinModal) {
+      // Check if user already has a username
+      const hasUsername = currentLeetCodeUsername || localStorage.getItem("lb_leetcodeUsername");
+      
+      if (!hasUsername) {
+        // No username - show join modal to get username first
         setFriendUsernames([]);
         setRooms([]);
         setCurrentRoomId(null);
-      setShowInitialSetup(false); // Hide initial setup if showing join modal
+        setShowInitialSetup(false);
         setShowJoinModal(true);
-        return;
-      
-      // If join modal is showing, don't process room yet (wait for handleJoinRoom)
-      if (showJoinModal) {
         return;
       }
       
+      // User has username - try to join room automatically
       // Set currentRoomId first so snapshot listener can initialize
       setCurrentRoomId(roomId);
       
@@ -991,17 +1070,14 @@ export default function App() {
           const newUrl = window.location.pathname;
           window.history.replaceState({}, "", newUrl);
         }
-      }).catch(() => {
-        // If fetch fails, still try to switch to the room if it exists locally
-        const roomExists = rooms.some(r => r.id === roomId);
-        if (roomExists) {
-          setCurrentRoomId(roomId);
-          const newUrl = window.location.pathname;
-          window.history.replaceState({}, "", newUrl);
-        }
+      }).catch((err) => {
+        console.error("Error loading room from URL:", err);
+        // If fetch fails, show join modal so user can manually join
+        setShowJoinModal(true);
+        setCurrentRoomId(null);
       });
     }
-  }, [db, fetchSharedRoom, saveUserRooms, showJoinModal]); // Removed saveSharedRoom from deps to avoid loops
+  }, [db, currentRoomId, currentLeetCodeUsername, showJoinModal, fetchSharedRoom, saveUserRooms, rooms]); // Added dependencies
 
   // Close room modal when clicking outside
   useEffect(() => {
@@ -1027,20 +1103,25 @@ export default function App() {
      Room management functions
      --------------------------- */
   const createRoom = async (roomName = null, leetcodeUsername = null) => {
-    const name = (roomName || newRoomName).trim();
-    if (!name) {
-      setError("Room name is required");
-      setTimeout(() => setError(null), 2200);
-      return;
-    }
-    
-    // Use provided username or current LeetCode username
-    const username = leetcodeUsername || currentLeetCodeUsername;
-    
-    // Normalize room name to create unique ID
-    const normalizedId = normalizeRoomName(name);
-    
-    // First check local rooms list for duplicate name (case-insensitive)
+    try {
+      if (!db) {
+        throw new Error("Database not ready. Please wait...");
+      }
+      
+      const name = (roomName || newRoomName).trim();
+      if (!name) {
+        setError("Room name is required");
+        setTimeout(() => setError(null), 2200);
+        return;
+      }
+      
+      // Use provided username or current LeetCode username
+      const username = leetcodeUsername || currentLeetCodeUsername;
+      
+      // Normalize room name to create unique ID
+      const normalizedId = normalizeRoomName(name);
+      
+      // First check local rooms list for duplicate name (case-insensitive)
     const localDuplicate = rooms.find(r => 
       r.id === normalizedId || r.name.toLowerCase() === name.toLowerCase()
     );
@@ -1154,111 +1235,168 @@ export default function App() {
     setNewRoomName("");
     setShowRoomModal(false);
     playBeep();
+    } catch (error) {
+      console.error("Error creating room:", error);
+      setError(`Failed to create room: ${error.message || "Unknown error"}`);
+      setTimeout(() => setError(null), 3000);
+      throw error; // Re-throw so caller can handle it
+    }
   };
 
   // Initial setup handler
   const handleInitialSetup = async () => {
-    const username = initialLeetCodeUsername.trim();
-    const roomName = initialRoomName.trim();
-    
-    if (!username) {
-      setError("LeetCode username is required");
-      setTimeout(() => setError(null), 2200);
-      return;
+    try {
+      const username = initialLeetCodeUsername.trim();
+      const roomName = initialRoomName.trim();
+      
+      if (!username) {
+        setError("LeetCode username is required");
+        setTimeout(() => setError(null), 2200);
+        return;
+      }
+      if (!roomName) {
+        setError("Room name is required");
+        setTimeout(() => setError(null), 2200);
+        return;
+      }
+      
+      if (!db) {
+        setError("Database not ready. Please wait...");
+        setTimeout(() => setError(null), 2200);
+        return;
+      }
+      
+      setLoading(true);
+      setAppStatus("Creating room...");
+      
+      // Save username to localStorage
+      localStorage.setItem("lb_leetcodeUsername", username);
+      setCurrentLeetCodeUsername(username);
+      
+      // Create or join room
+      await createRoom(roomName, username);
+      
+      // Close setup modal
+      setShowInitialSetup(false);
+      setAppStatus("Ready to battle");
+      setLoading(false);
+      playBeep();
+    } catch (error) {
+      console.error("Error in initial setup:", error);
+      setError(`Failed to start: ${error.message || "Unknown error"}`);
+      setTimeout(() => setError(null), 3000);
+      setLoading(false);
+      setAppStatus("Error starting");
     }
-    if (!roomName) {
-      setError("Room name is required");
-      setTimeout(() => setError(null), 2200);
-      return;
-    }
-    
-    // Save username to localStorage
-    localStorage.setItem("lb_leetcodeUsername", username);
-    setCurrentLeetCodeUsername(username);
-    
-    // Create or join room
-    await createRoom(roomName, username);
-    
-    // Close setup modal
-    setShowInitialSetup(false);
-    setAppStatus("Ready to battle");
   };
 
   // Join room handler (when joining via link)
   const handleJoinRoom = async () => {
-    const username = joinLeetCodeUsername.trim();
-    
-    if (!username) {
-      setError("LeetCode username is required");
-      setTimeout(() => setError(null), 2200);
-      return;
-    }
-    
-    // Save username to localStorage
-    localStorage.setItem("lb_leetcodeUsername", username);
-    setCurrentLeetCodeUsername(username);
-    
-    // Get room from URL
-    const params = new URLSearchParams(window.location.search);
-    const roomId = params.get("room");
-    
-    if (!roomId || !db) {
-      setError("Invalid room link");
-      setTimeout(() => setError(null), 2200);
-      setShowJoinModal(false);
-      return;
-    }
-    
     try {
-      // Set currentRoomId first so snapshot listener can initialize
-      setCurrentRoomId(roomId);
+      const username = joinLeetCodeUsername.trim();
       
-      const sharedRoom = await fetchSharedRoom(roomId);
-      if (sharedRoom) {
-        // Add username to room if not already present
-        const updatedUsernames = [...(sharedRoom.usernames || [])];
-        if (!updatedUsernames.includes(username)) {
-          updatedUsernames.push(username);
-        }
-        
-        // Save to Firebase with updated usernames directly
-        const roomPath = typeof __app_id !== "undefined"
-          ? `/artifacts/${appId}/rooms/${roomId}`
-          : `rooms/${roomId}`;
-        await setDoc(doc(db, roomPath), {
-          id: roomId,
-          name: sharedRoom.name || `Room ${roomId.substring(0, 8)}`,
-          usernames: updatedUsernames
-        }, { merge: true });
-        
-        // Update local state - start fresh with just this room (don't keep old rooms from localStorage)
-        const newRoom = {
-          id: roomId,
-          name: sharedRoom.name || `Room ${roomId.substring(0, 8)}`,
-          usernames: updatedUsernames
-        };
-        setRooms([newRoom]);
-        saveUserRooms([newRoom]);
-        
-        // Snapshot listener will update friendUsernames in real-time
-        setShowJoinModal(false);
-        setAppStatus("Joined room!");
-        
-        // Clean URL
-        window.history.replaceState({}, "", window.location.pathname);
-        playBeep();
-      } else {
-        setError("Room not found");
+      if (!username) {
+        setError("LeetCode username is required");
+        setTimeout(() => setError(null), 2200);
+        return;
+      }
+      
+      if (!db) {
+        setError("Database not ready. Please wait...");
+        setTimeout(() => setError(null), 2200);
+        return;
+      }
+      
+      // Save username to localStorage
+      localStorage.setItem("lb_leetcodeUsername", username);
+      setCurrentLeetCodeUsername(username);
+      
+      // Get room from URL
+      const params = new URLSearchParams(window.location.search);
+      const roomId = params.get("room");
+      
+      if (!roomId) {
+        setError("Invalid room link - no room ID found");
         setTimeout(() => setError(null), 2200);
         setShowJoinModal(false);
-        setCurrentRoomId(null); // Reset if room not found
+        return;
       }
+      
+      setLoading(true);
+      setAppStatus("Joining room...");
+      
+      // Fetch room first before setting currentRoomId
+      const sharedRoom = await fetchSharedRoom(roomId);
+      
+      if (!sharedRoom) {
+        setError("Room not found");
+        setTimeout(() => setError(null), 3000);
+        setShowJoinModal(false);
+        setLoading(false);
+        setAppStatus("Room not found");
+        return;
+      }
+      
+      // Add username to room if not already present
+      const updatedUsernames = [...(sharedRoom.usernames || [])];
+      if (!updatedUsernames.includes(username)) {
+        updatedUsernames.push(username);
+      }
+      
+      // Save to Firebase with updated usernames directly
+      const roomPath = typeof __app_id !== "undefined"
+        ? `/artifacts/${appId}/rooms/${roomId}`
+        : `rooms/${roomId}`;
+      
+      await setDoc(doc(db, roomPath), {
+        id: roomId,
+        name: sharedRoom.name || `Room ${roomId.substring(0, 8)}`,
+        usernames: updatedUsernames
+      }, { merge: true });
+      
+      // Update local state - start fresh with just this room (don't keep old rooms from localStorage)
+      const newRoom = {
+        id: roomId,
+        name: sharedRoom.name || `Room ${roomId.substring(0, 8)}`,
+        usernames: updatedUsernames
+      };
+      
+      // Set currentRoomId AFTER we've verified the room exists and saved it
+      setCurrentRoomId(roomId);
+      setRooms([newRoom]);
+      
+      // Save to user's room list (only if we have currentUserId)
+      if (currentUserId) {
+        try {
+          await saveUserRooms([newRoom]);
+        } catch (saveError) {
+          console.error("Error saving user rooms:", saveError);
+          // Don't fail the join if this fails - room is already joined
+        }
+      }
+      
+      // Snapshot listener will update friendUsernames in real-time
+      setShowJoinModal(false);
+      setAppStatus("Joined room!");
+      setLoading(false);
+      
+      // Clean URL
+      try {
+        window.history.replaceState({}, "", window.location.pathname);
+      } catch (historyError) {
+        console.error("Error updating history:", historyError);
+        // Don't fail if history update fails
+      }
+      
+      playBeep();
     } catch (e) {
       console.error("Error joining room:", e);
-      setError("Failed to join room");
-      setTimeout(() => setError(null), 2200);
+      setError(`Failed to join room: ${e.message || "Unknown error"}`);
+      setTimeout(() => setError(null), 3000);
       setShowJoinModal(false);
       setCurrentRoomId(null); // Reset on error
+      setLoading(false);
+      setAppStatus("Error joining room");
     }
   };
 
@@ -1699,8 +1837,9 @@ export default function App() {
       if (event.candidate && db && SHARED_ROOM_PATH) {
         // Send ICE candidate via Firebase - use a document ID that includes both usernames
         const signalingDocId = `signal_${currentLeetCodeUsername}_${username}_${Date.now()}`;
-        const signalingPath = `${SHARED_ROOM_PATH}/voiceSignaling/${signalingDocId}`;
-        setDoc(doc(db, signalingPath), {
+        const roomDocRef = doc(db, SHARED_ROOM_PATH);
+        const signalingDocRef = doc(roomDocRef, 'voiceSignaling', signalingDocId);
+        setDoc(signalingDocRef, {
           from: currentLeetCodeUsername,
           to: username,
           type: 'ice-candidate',
@@ -1745,7 +1884,7 @@ export default function App() {
     });
   };
 
-  // Start voice call
+  // Start or join voice call
   const startVoiceCall = async () => {
     if (!currentLeetCodeUsername || !currentRoomId || !db) {
       setError("Cannot start call: missing user info");
@@ -1761,6 +1900,28 @@ export default function App() {
 
     try {
       setLoading(true);
+
+      // Check if there's already an active call
+      const roomDoc = await getDoc(doc(db, SHARED_ROOM_PATH));
+      const existingCall = roomDoc.exists() ? roomDoc.data()?.voiceCall : null;
+      
+      let participants = [];
+      let isJoiningExistingCall = false;
+      
+      if (existingCall && existingCall.active) {
+        // Join existing call
+        isJoiningExistingCall = true;
+        participants = [...(existingCall.participants || [])];
+        if (!participants.includes(currentLeetCodeUsername)) {
+          participants.push(currentLeetCodeUsername);
+        }
+        console.log(`[Voice] Joining existing call with participants: ${participants.join(', ')}`);
+      } else {
+        // Start new call
+        participants = [currentLeetCodeUsername, ...friendUsernames.filter(u => u !== currentLeetCodeUsername)];
+        console.log(`[Voice] Starting new call with participants: ${participants.join(', ')}`);
+      }
+
       setIsInCall(true);
       setIsCallActive(false);
 
@@ -1772,15 +1933,31 @@ export default function App() {
         return;
       }
 
+      // Update Firebase with new participant list
+      await setDoc(doc(db, SHARED_ROOM_PATH), {
+        voiceCall: {
+          active: true,
+          participants: participants,
+          startedBy: existingCall?.startedBy || currentLeetCodeUsername,
+          startedAt: existingCall?.startedAt || Date.now(),
+          lastUpdated: Date.now()
+        }
+      }, { merge: true });
+
       // Signaling will be handled by the useEffect listener below
       signalingChannelRef.current = { active: true };
 
-      // Create peer connections for all other users in the room
-      const otherUsers = friendUsernames.filter(u => u !== currentLeetCodeUsername);
-      setCallParticipants([currentLeetCodeUsername, ...otherUsers]);
+      // Create peer connections for all other users in the call
+      const otherUsers = participants.filter(u => u !== currentLeetCodeUsername);
+      setCallParticipants(participants);
 
-      // Create offer for each peer
+      // Create offer for each peer (only for users we don't have connections with)
       for (const username of otherUsers) {
+        // Skip if we already have a connection
+        if (peerConnectionsRef.current.has(username)) {
+          continue;
+        }
+        
         const pc = createPeerConnection(username);
         
         // Create and send offer
@@ -1789,8 +1966,9 @@ export default function App() {
 
         // Send offer via Firebase - use unique document ID
         const offerDocId = `offer_${currentLeetCodeUsername}_${username}_${Date.now()}`;
-        const offerPath = `${SHARED_ROOM_PATH}/voiceSignaling/${offerDocId}`;
-        await setDoc(doc(db, offerPath), {
+        const roomDocRef = doc(db, SHARED_ROOM_PATH);
+        const offerDocRef = doc(roomDocRef, 'voiceSignaling', offerDocId);
+        await setDoc(offerDocRef, {
           from: currentLeetCodeUsername,
           to: username,
           type: 'offer',
@@ -1799,28 +1977,21 @@ export default function App() {
         }, { merge: true });
       }
 
-      // Broadcast that we're in a call
-      await setDoc(doc(db, `${SHARED_ROOM_PATH}/voiceCall`), {
-        active: true,
-        participants: [currentLeetCodeUsername, ...otherUsers],
-        startedBy: currentLeetCodeUsername,
-        startedAt: Date.now()
-      }, { merge: true });
-
       setIsCallActive(true);
       setLoading(false);
       playBeep();
     } catch (error) {
-      console.error("[Voice] Error starting call:", error);
-      setError("Failed to start voice call");
+      console.error("[Voice] Error starting/joining call:", error);
+      setError("Failed to start/join voice call");
       setTimeout(() => setError(null), 3000);
-      endVoiceCall();
+      // Remove user from call on error
+      await leaveVoiceCall();
       setLoading(false);
     }
   };
 
-  // End voice call
-  const endVoiceCall = async () => {
+  // Leave voice call (remove user from call, but keep call active if others are in it)
+  const leaveVoiceCall = async () => {
     // Stop local stream
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(track => track.stop());
@@ -1844,24 +2015,54 @@ export default function App() {
       signalingChannelRef.current = null;
     }
 
-    // Update Firebase
+    // Update Firebase - remove user from participants, or remove call if no one left
     if (db && SHARED_ROOM_PATH) {
       try {
-        await setDoc(doc(db, `${SHARED_ROOM_PATH}/voiceCall`), {
-          active: false,
-          endedAt: Date.now()
-        }, { merge: true });
+        const docRef = doc(db, SHARED_ROOM_PATH);
+        const currentDoc = await getDoc(docRef);
+        if (currentDoc.exists()) {
+          const currentData = currentDoc.data();
+          const voiceCall = currentData.voiceCall;
+          
+          if (voiceCall && voiceCall.active && voiceCall.participants) {
+            // Remove current user from participants
+            const updatedParticipants = voiceCall.participants.filter(
+              (p) => p !== currentLeetCodeUsername
+            );
+            
+            if (updatedParticipants.length === 0) {
+              // No participants left - remove call completely
+              await setDoc(docRef, {
+                ...currentData,
+                voiceCall: deleteField()
+              }, { merge: true });
+            } else {
+              // Update participants list
+              await setDoc(docRef, {
+                ...currentData,
+                voiceCall: {
+                  ...voiceCall,
+                  participants: updatedParticipants,
+                  lastUpdated: Date.now()
+                }
+              }, { merge: true });
+            }
+          }
+        }
       } catch (err) {
         console.error("Error updating call status:", err);
       }
     }
 
     setIsInCall(false);
-    setIsCallActive(false);
     setIsMuted(false);
-    setCallParticipants([]);
+    // Don't set isCallActive to false here - let the snapshot listener handle it
+    // This way if others are still in the call, we'll see it's still active
     playBeep();
   };
+
+  // End voice call (alias for leaveVoiceCall for backward compatibility)
+  const endVoiceCall = leaveVoiceCall;
 
   // Toggle mute
   const toggleMute = () => {
@@ -1893,7 +2094,9 @@ export default function App() {
     }
 
     // Use collection query to listen for all signaling messages directed to current user
-    const signalingCollection = collection(db, `${SHARED_ROOM_PATH}/voiceSignaling`);
+    // Create subcollection reference properly using document reference
+    const roomDocRef = doc(db, SHARED_ROOM_PATH);
+    const signalingCollection = collection(roomDocRef, 'voiceSignaling');
     const q = query(
       signalingCollection,
       where('to', '==', currentLeetCodeUsername),
@@ -1930,8 +2133,9 @@ export default function App() {
             
             // Send answer via Firebase
             const answerDocId = `answer_${currentLeetCodeUsername}_${fromUser}_${Date.now()}`;
-            const answerPath = `${SHARED_ROOM_PATH}/voiceSignaling/${answerDocId}`;
-            await setDoc(doc(db, answerPath), {
+            const roomDocRef = doc(db, SHARED_ROOM_PATH);
+            const answerDocRef = doc(roomDocRef, 'voiceSignaling', answerDocId);
+            await setDoc(answerDocRef, {
               from: currentLeetCodeUsername,
               to: fromUser,
               type: 'answer',
@@ -1975,7 +2179,7 @@ export default function App() {
 
     // Also listen for messages we sent (to handle answers and ICE candidates from others)
     const qSent = query(
-      signalingCollection,
+      signalingCollection, // Reuse the same collection reference
       where('from', '==', currentLeetCodeUsername),
       orderBy('timestamp', 'desc'),
       limit(50)
@@ -2009,36 +2213,44 @@ export default function App() {
     };
   }, [db, SHARED_ROOM_PATH, currentRoomId, currentLeetCodeUsername, friendUsernames, isInCall]);
 
-  // Listen for voice call status from other users
-  useEffect(() => {
-    if (!db || !SHARED_ROOM_PATH || !currentRoomId) return;
-
-    const callRef = doc(db, `${SHARED_ROOM_PATH}/voiceCall`);
-    const unsub = onSnapshot(callRef, (snap) => {
-      if (snap.exists()) {
-        const data = snap.data();
-        if (data.active && data.participants) {
-          // If someone else started a call and we're not in it, we could auto-join
-          // For now, we'll just show that a call is active
-          if (!isInCall && data.startedBy !== currentLeetCodeUsername) {
-            // Optionally auto-join or show notification
-            console.log(`[Voice] Call active in room started by ${data.startedBy}`);
-          }
-        }
-      }
-    });
-
-    return () => unsub();
-  }, [db, SHARED_ROOM_PATH, currentRoomId, currentLeetCodeUsername, isInCall]);
+  // Voice call state is now synced via the main room snapshot listener above
+  // This listener is no longer needed as voiceCall is part of room data
 
   // Cleanup on unmount or room change
   useEffect(() => {
     return () => {
       if (isInCall) {
-        endVoiceCall();
+        try {
+          // Clean up voice call resources
+          if (localStreamRef.current) {
+            localStreamRef.current.getTracks().forEach(track => track.stop());
+            localStreamRef.current = null;
+          }
+          peerConnectionsRef.current.forEach((pc) => {
+            try {
+              pc.close();
+            } catch (e) {
+              console.error("Error closing peer connection:", e);
+            }
+          });
+          peerConnectionsRef.current.clear();
+          audioElementsRef.current.forEach((audio) => {
+            try {
+              audio.pause();
+              audio.srcObject = null;
+            } catch (e) {
+              console.error("Error cleaning up audio:", e);
+            }
+          });
+          audioElementsRef.current.clear();
+          setIsInCall(false);
+          setIsCallActive(false);
+        } catch (error) {
+          console.error("Error in voice call cleanup:", error);
+        }
       }
     };
-  }, [currentRoomId]); // Clean up when switching rooms
+  }, [currentRoomId, isInCall]); // Clean up when switching rooms
 
   // Ref to store checkSubmissions function for manual refresh
   const checkSubmissionsRef = useRef(null);
@@ -2570,6 +2782,48 @@ export default function App() {
   /* ---------------------------
      Render
      --------------------------- */
+  // Don't block rendering on errors - let error toast handle it
+  // Only show error screen for critical initialization failures
+  if (error && error.includes("Firebase initialization error") && !db) {
+    return (
+      <div style={{ 
+        display: "flex", 
+        flexDirection: "column", 
+        alignItems: "center", 
+        justifyContent: "center", 
+        minHeight: "100vh",
+        padding: "20px",
+        fontFamily: "Inter, sans-serif",
+        background: "#f9fafb",
+        color: "#111827"
+      }}>
+        <h1 style={{ fontSize: "24px", marginBottom: "16px" }}>⚠️ Initialization Error</h1>
+        <p style={{ fontSize: "16px", color: "#6b7280", textAlign: "center", maxWidth: "500px" }}>
+          {error}
+        </p>
+        <p style={{ fontSize: "14px", color: "#9ca3af", marginTop: "16px" }}>
+          Please check the browser console for more details.
+        </p>
+        <button 
+          onClick={() => window.location.reload()} 
+          style={{
+            marginTop: "20px",
+            padding: "12px 24px",
+            borderRadius: "8px",
+            border: "0",
+            background: "linear-gradient(90deg,#06b6d4,#7c3aed)",
+            color: "white",
+            cursor: "pointer",
+            fontWeight: 600,
+            fontSize: "14px"
+          }}
+        >
+          Reload Page
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="app-root">
       {/* scoped styles */}
@@ -2836,27 +3090,201 @@ export default function App() {
         .modal-btn-primary { background:linear-gradient(90deg,#06b6d4,#7c3aed); color:white; }
         .modal-btn-secondary { background:var(--card); color:var(--text); border:1px solid var(--border); }
 
-        /* chat styles */
-        .chat-card { display: flex; flex-direction: column; }
-        .chat-messages { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
-        .chat-messages::-webkit-scrollbar { width: 6px; }
+        /* chat styles - modern and vibrant */
+        .chat-card { 
+          display: flex; 
+          flex-direction: column; 
+          background: linear-gradient(135deg, var(--card) 0%, rgba(255,255,255,0.95) 100%);
+          border: 2px solid var(--border);
+          box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+          position: relative;
+          overflow: hidden;
+        }
+        .chat-card::before {
+          content: '';
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          height: 3px;
+          background: linear-gradient(90deg, #06b6d4, #7c3aed, #ec4899);
+          opacity: 0.8;
+        }
+        [data-theme="dark"] .chat-card {
+          background: linear-gradient(135deg, var(--card) 0%, rgba(30,41,59,0.95) 100%);
+        }
+        [data-theme="neon"] .chat-card {
+          background: linear-gradient(135deg, var(--card) 0%, rgba(26,26,46,0.95) 100%);
+          border-color: #8b5cf6;
+          box-shadow: 0 4px 20px rgba(139,92,246,0.3);
+        }
+        .chat-messages { 
+          scrollbar-width: thin; 
+          scrollbar-color: var(--border) transparent;
+          background: linear-gradient(to bottom, rgba(236,254,255,0.3), transparent);
+          position: relative;
+        }
+        [data-theme="dark"] .chat-messages {
+          background: linear-gradient(to bottom, rgba(30,58,138,0.2), transparent);
+        }
+        [data-theme="neon"] .chat-messages {
+          background: linear-gradient(to bottom, rgba(49,46,129,0.3), transparent);
+        }
+        .chat-messages::-webkit-scrollbar { width: 8px; }
         .chat-messages::-webkit-scrollbar-track { background: transparent; }
-        .chat-messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-        .chat-messages::-webkit-scrollbar-thumb:hover { background: var(--muted); }
-        .chat-message { transition: transform 0.2s ease, box-shadow 0.2s ease; }
-        .chat-message:hover { transform: translateY(-1px); box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-        .chat-message-own { background: linear-gradient(135deg, #e0f2fe, #dbeafe) !important; }
-        [data-theme="dark"] .chat-message-own { background: linear-gradient(135deg, #1e3a8a, #1e40af) !important; }
-        [data-theme="neon"] .chat-message-own { background: linear-gradient(135deg, #312e81, #4c1d95) !important; box-shadow: 0 0 10px rgba(139, 92, 246, 0.3); }
-        .chat-input-form { display: flex; gap: 8px; }
-        .chat-input { flex: 1; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--text); font-size: 14px; transition: border-color 0.2s ease; }
-        .chat-input:focus { outline: none; border-color: #06b6d4; }
-        .chat-send-btn { padding: 10px 16px; border-radius: 8px; border: 0; background: linear-gradient(90deg,#06b6d4,#7c3aed); color: white; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: transform 0.2s ease, box-shadow 0.2s ease; }
-        .chat-send-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(6, 182, 212, 0.4); }
-        .chat-send-btn:active:not(:disabled) { transform: translateY(0); }
-        .chat-send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-        [data-theme="neon"] .chat-send-btn { background: linear-gradient(90deg,#3b82f6,#8b5cf6); box-shadow: 0 4px 15px rgba(139,92,246,0.4); }
-        [data-theme="neon"] .chat-send-btn:hover:not(:disabled) { box-shadow: 0 6px 20px rgba(139,92,246,0.6); }
+        .chat-messages::-webkit-scrollbar-thumb { 
+          background: linear-gradient(180deg, #06b6d4, #7c3aed); 
+          border-radius: 4px; 
+        }
+        .chat-messages::-webkit-scrollbar-thumb:hover { 
+          background: linear-gradient(180deg, #0891b2, #6d28d9); 
+        }
+        .chat-message { 
+          transition: all 0.2s ease;
+          animation: messageSlideIn 0.2s ease-out;
+          position: relative;
+        }
+        @keyframes messageSlideIn {
+          from {
+            opacity: 0;
+            transform: translateY(5px);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
+        }
+        .chat-message:hover { 
+          transform: translateY(-1px); 
+          box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .chat-message-own { 
+          background: linear-gradient(135deg, #06b6d4 0%, #7c3aed 100%) !important;
+          color: white !important;
+          box-shadow: 0 1px 3px rgba(6, 182, 212, 0.15) !important;
+        }
+        .chat-message:not(.chat-message-own) {
+          background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%) !important;
+          border: 1px solid rgba(6, 182, 212, 0.1);
+          box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+        }
+        [data-theme="dark"] .chat-message-own { 
+          background: linear-gradient(135deg, #1e40af 0%, #7c3aed 100%) !important;
+          box-shadow: 0 4px 12px rgba(124, 58, 237, 0.4) !important;
+        }
+        [data-theme="dark"] .chat-message:not(.chat-message-own) {
+          background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%) !important;
+          border-color: rgba(59, 130, 246, 0.3);
+        }
+        [data-theme="neon"] .chat-message-own { 
+          background: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%) !important;
+          box-shadow: 0 4px 15px rgba(139, 92, 246, 0.5), 0 0 20px rgba(139, 92, 246, 0.2) !important;
+        }
+        [data-theme="neon"] .chat-message:not(.chat-message-own) {
+          background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%) !important;
+          border-color: rgba(139, 92, 246, 0.4);
+          box-shadow: 0 2px 10px rgba(139, 92, 246, 0.2);
+        }
+        .chat-input-form { 
+          display: flex; 
+          gap: 8px;
+          padding: 6px;
+          background: linear-gradient(135deg, rgba(236,254,255,0.3), rgba(255,255,255,0.6));
+          border-radius: 8px;
+          border: 1px solid rgba(6, 182, 212, 0.15);
+        }
+        [data-theme="dark"] .chat-input-form {
+          background: linear-gradient(135deg, rgba(30,58,138,0.3), rgba(30,41,59,0.8));
+          border-color: rgba(59, 130, 246, 0.3);
+        }
+        [data-theme="neon"] .chat-input-form {
+          background: linear-gradient(135deg, rgba(49,46,129,0.4), rgba(26,26,46,0.8));
+          border-color: rgba(139, 92, 246, 0.4);
+          box-shadow: 0 0 15px rgba(139, 92, 246, 0.1);
+        }
+        .chat-input { 
+          flex: 1; 
+          padding: 8px 12px; 
+          border-radius: 8px; 
+          border: 1px solid transparent;
+          background: rgba(255,255,255,0.9);
+          color: var(--text); 
+          font-size: 13px; 
+          transition: all 0.2s ease;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+        }
+        .chat-input:focus { 
+          outline: none; 
+          border-color: #06b6d4;
+          background: rgba(255,255,255,1);
+          box-shadow: 0 2px 6px rgba(6, 182, 212, 0.15);
+        }
+        [data-theme="dark"] .chat-input {
+          background: rgba(30,41,59,0.9);
+        }
+        [data-theme="dark"] .chat-input:focus {
+          background: rgba(30,41,59,1);
+          border-color: #3b82f6;
+        }
+        [data-theme="neon"] .chat-input {
+          background: rgba(26,26,46,0.9);
+        }
+        [data-theme="neon"] .chat-input:focus {
+          background: rgba(26,26,46,1);
+          border-color: #8b5cf6;
+          box-shadow: 0 4px 15px rgba(139, 92, 246, 0.3);
+        }
+        .chat-send-btn { 
+          padding: 8px 14px; 
+          border-radius: 8px; 
+          border: 0; 
+          background: linear-gradient(135deg,#06b6d4,#7c3aed); 
+          color: white; 
+          cursor: pointer; 
+          display: flex; 
+          align-items: center; 
+          justify-content: center; 
+          transition: all 0.2s ease;
+          box-shadow: 0 2px 6px rgba(6, 182, 212, 0.25);
+          font-weight: 500;
+          position: relative;
+          overflow: hidden;
+        }
+        .chat-send-btn::before {
+          content: '';
+          position: absolute;
+          top: 50%;
+          left: 50%;
+          width: 0;
+          height: 0;
+          border-radius: 50%;
+          background: rgba(255,255,255,0.3);
+          transform: translate(-50%, -50%);
+          transition: width 0.6s, height 0.6s;
+        }
+        .chat-send-btn:hover:not(:disabled) { 
+          transform: translateY(-1px); 
+          box-shadow: 0 3px 8px rgba(6, 182, 212, 0.35);
+        }
+        .chat-send-btn:hover:not(:disabled)::before {
+          width: 300px;
+          height: 300px;
+        }
+        .chat-send-btn:active:not(:disabled) { 
+          transform: translateY(0) scale(0.98); 
+        }
+        .chat-send-btn:disabled { 
+          opacity: 0.5; 
+          cursor: not-allowed;
+          transform: none;
+        }
+        [data-theme="neon"] .chat-send-btn { 
+          background: linear-gradient(135deg,#3b82f6,#8b5cf6); 
+          box-shadow: 0 4px 15px rgba(139,92,246,0.5), 0 0 20px rgba(139,92,246,0.2); 
+        }
+        [data-theme="neon"] .chat-send-btn:hover:not(:disabled) { 
+          box-shadow: 0 6px 25px rgba(139,92,246,0.7), 0 0 30px rgba(139,92,246,0.3); 
+        }
 
         /* voice call styles */
         .voice-call-btn { transition: transform 0.2s ease, box-shadow 0.2s ease; }
@@ -3147,15 +3575,45 @@ export default function App() {
 
             {/* Chat Component */}
             <div className="card chat-card">
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <MessageCircle className="icon" style={{ width: 18, height: 18 }} />
-                  <h3 style={{ margin: 0 }}>Room Chat</h3>
+              <div style={{ 
+                display: "flex", 
+                justifyContent: "space-between", 
+                alignItems: "center", 
+                marginBottom: 16,
+                paddingBottom: 12,
+                borderBottom: "2px solid rgba(6,182,212,0.1)"
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <div style={{
+                    width: "40px",
+                    height: "40px",
+                    borderRadius: "12px",
+                    background: "linear-gradient(135deg, #06b6d4, #7c3aed)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    boxShadow: "0 4px 12px rgba(6,182,212,0.3)"
+                  }}>
+                    <MessageCircle className="icon" style={{ width: 20, height: 20, color: "white" }} />
+                  </div>
+                  <div>
+                    <h3 style={{ 
+                      margin: 0, 
+                      fontSize: "18px", 
+                      fontWeight: 700, 
+                      background: "linear-gradient(135deg, #06b6d4, #7c3aed)", 
+                      WebkitBackgroundClip: "text", 
+                      WebkitTextFillColor: "transparent",
+                      backgroundClip: "text"
+                    }}>
+                      Room Chat
+                    </h3>
+                    <div style={{ fontSize: "11px", color: "var(--muted)", marginTop: "2px" }}>
+                      {messages.length} {messages.length === 1 ? "message" : "messages"}
+                    </div>
+                  </div>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <div className="mini" style={{ fontSize: "11px", color: "var(--muted)" }}>
-                    {messages.length} {messages.length === 1 ? "message" : "messages"}
-                  </div>
                   {!isInCall ? (
                     <button
                       className="voice-call-btn"
@@ -3206,8 +3664,8 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Voice Call Controls */}
-              {isInCall && (
+              {/* Voice Call Controls - Show for all users when call is active */}
+              {(isInCall || isCallActive) && (
                 <div className="voice-call-controls" style={{
                   padding: "12px",
                   marginBottom: "12px",
@@ -3219,15 +3677,30 @@ export default function App() {
                   gap: "8px"
                 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <div style={{ fontSize: "13px", fontWeight: 600, color: "var(--text)" }}>
-                      {isCallActive ? "🔊 Call Active" : "⏳ Connecting..."}
+                    <div style={{ fontSize: "13px", fontWeight: 600, color: "var(--text)", display: "flex", alignItems: "center", gap: "8px" }}>
+                      {isCallActive ? (
+                        <>
+                          <Phone className="icon" style={{ width: 14, height: 14, color: "#3b82f6" }} />
+                          Call Active
+                        </>
+                      ) : (
+                        <>
+                          <Phone className="icon" style={{ width: 14, height: 14 }} />
+                          Connecting...
+                        </>
+                      )}
+                      {!isInCall && isCallActive && (
+                        <span style={{ fontSize: "11px", color: "var(--muted)", fontWeight: 400 }}>
+                          (Started by {callParticipants[0] || "someone"})
+                        </span>
+                      )}
                     </div>
                     <div style={{ fontSize: "11px", color: "var(--muted)" }}>
                       {callParticipants.length} {callParticipants.length === 1 ? "participant" : "participants"}
                     </div>
                   </div>
                   
-                  {isCallActive && (
+                  {isCallActive && isInCall && (
                     <div style={{ display: "flex", gap: "8px", justifyContent: "center" }}>
                       <button
                         className="voice-control-btn"
@@ -3290,6 +3763,21 @@ export default function App() {
                       Participants: {callParticipants.join(", ")}
                     </div>
                   )}
+                  
+                  {!isInCall && isCallActive && (
+                    <div style={{ 
+                      marginTop: "8px", 
+                      padding: "8px", 
+                      borderRadius: "6px", 
+                      background: "var(--sky-50)",
+                      border: "1px solid var(--sky-200)",
+                      fontSize: "12px",
+                      color: "var(--text)",
+                      textAlign: "center"
+                    }}>
+                      💡 Someone else is in a call. Click "Call" to join them.
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -3298,65 +3786,115 @@ export default function App() {
                 maxHeight: "300px", 
                 overflowY: "auto", 
                 marginBottom: 12,
-                padding: "8px",
+                padding: "10px 8px",
                 borderRadius: "8px",
-                background: "var(--card)",
-                border: "1px solid var(--border)"
+                minHeight: "150px"
               }}>
                 {messages.length === 0 ? (
                   <div style={{ 
                     textAlign: "center", 
-                    padding: "20px", 
+                    padding: "30px 20px", 
                     color: "var(--muted)",
-                    fontSize: "13px"
+                    fontSize: "12px",
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    gap: "8px"
                   }}>
-                    No messages yet. Start the conversation!
+                    <div style={{
+                      width: "40px",
+                      height: "40px",
+                      borderRadius: "50%",
+                      background: "linear-gradient(135deg, rgba(6,182,212,0.1), rgba(124,58,237,0.1))",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      marginBottom: "4px"
+                    }}>
+                      <MessageCircle style={{ width: 20, height: 20, opacity: 0.5 }} />
+                    </div>
+                    <div style={{ fontWeight: 600, color: "var(--text)", fontSize: "13px" }}>No messages yet</div>
+                    <div style={{ fontSize: "11px" }}>Start the conversation!</div>
                   </div>
                 ) : (
-                  messages.map((msg) => {
+                  messages.map((msg, index) => {
                     const isCurrentUser = msg.username === currentLeetCodeUsername;
                     const messageDate = new Date(msg.timestamp);
                     const timeStr = messageDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                    const showAvatar = !isCurrentUser && (index === 0 || messages[index - 1].username !== msg.username);
                     
                     return (
                       <div 
                         key={msg.id} 
                         className={`chat-message ${isCurrentUser ? "chat-message-own" : ""}`}
                         style={{
-                          marginBottom: "12px",
-                          padding: "8px 12px",
-                          borderRadius: "8px",
-                          background: isCurrentUser ? "var(--sky-50)" : "var(--card)",
-                          border: `1px solid ${isCurrentUser ? "var(--sky-200)" : "var(--border)"}`,
-                          maxWidth: "85%",
+                          marginBottom: "8px",
+                          padding: "6px 10px",
+                          borderRadius: isCurrentUser ? "12px 12px 2px 12px" : "12px 12px 12px 2px",
+                          maxWidth: "70%",
                           marginLeft: isCurrentUser ? "auto" : "0",
-                          marginRight: isCurrentUser ? "0" : "auto"
+                          marginRight: isCurrentUser ? "0" : "auto",
+                          display: "flex",
+                          flexDirection: isCurrentUser ? "column" : "row",
+                          gap: "6px",
+                          alignItems: isCurrentUser ? "flex-end" : "flex-start"
                         }}
                       >
-                        {!isCurrentUser && (
-                          <div style={{ 
-                            fontSize: "11px", 
-                            fontWeight: 700, 
-                            color: "var(--text)",
-                            marginBottom: "4px"
+                        {!isCurrentUser && showAvatar && (
+                          <div style={{
+                            width: "24px",
+                            height: "24px",
+                            borderRadius: "50%",
+                            background: "linear-gradient(135deg, #06b6d4, #7c3aed)",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            color: "white",
+                            fontWeight: 700,
+                            fontSize: "10px",
+                            flexShrink: 0,
+                            boxShadow: "0 1px 4px rgba(6,182,212,0.2)"
                           }}>
-                            {msg.username}
+                            {msg.username.charAt(0).toUpperCase()}
                           </div>
                         )}
-                        <div style={{ 
-                          fontSize: "14px", 
-                          color: "var(--text)",
-                          wordBreak: "break-word"
-                        }}>
-                          {msg.text}
-                        </div>
-                        <div style={{ 
-                          fontSize: "10px", 
-                          color: "var(--muted)", 
-                          marginTop: "4px",
-                          textAlign: isCurrentUser ? "right" : "left"
-                        }}>
-                          {timeStr}
+                        {!isCurrentUser && !showAvatar && (
+                          <div style={{ width: "24px", flexShrink: 0 }} />
+                        )}
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          {!isCurrentUser && showAvatar && (
+                            <div style={{ 
+                              fontSize: "11px", 
+                              fontWeight: 600, 
+                              color: "var(--text)",
+                              marginBottom: "3px"
+                            }}>
+                              {msg.username}
+                            </div>
+                          )}
+                          <div style={{ 
+                            fontSize: "13px", 
+                            color: isCurrentUser ? "white" : "var(--text)",
+                            wordBreak: "break-word",
+                            lineHeight: "1.4",
+                            fontWeight: isCurrentUser ? 500 : 400
+                          }}>
+                            {msg.text}
+                          </div>
+                          <div style={{ 
+                            fontSize: "9px", 
+                            color: isCurrentUser ? "rgba(255,255,255,0.6)" : "var(--muted)", 
+                            marginTop: "3px",
+                            textAlign: isCurrentUser ? "right" : "left",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "3px"
+                          }}>
+                            {timeStr}
+                            {isCurrentUser && (
+                              <CheckCircle style={{ width: 10, height: 10, opacity: 0.6 }} />
+                            )}
+                          </div>
                         </div>
                       </div>
                     );
@@ -3372,44 +3910,20 @@ export default function App() {
                   e.preventDefault();
                   sendMessage();
                 }}
-                style={{ display: "flex", gap: "8px" }}
               >
                 <input
                   type="text"
                   className="chat-input"
-                  placeholder="Type a message..."
+                  placeholder="💬 Type a message..."
                   value={newMessage}
                   onChange={(e) => setNewMessage(e.target.value)}
-                  style={{
-                    flex: 1,
-                    padding: "10px 12px",
-                    borderRadius: "8px",
-                    border: "1px solid var(--border)",
-                    background: "var(--card)",
-                    color: "var(--text)",
-                    fontSize: "14px"
-                  }}
                 />
                 <button
                   type="submit"
                   className="chat-send-btn"
                   disabled={!newMessage.trim()}
-                  style={{
-                    padding: "10px 16px",
-                    borderRadius: "8px",
-                    border: "0",
-                    background: newMessage.trim() 
-                      ? "linear-gradient(90deg,#06b6d4,#7c3aed)" 
-                      : "var(--border)",
-                    color: newMessage.trim() ? "white" : "var(--muted)",
-                    cursor: newMessage.trim() ? "pointer" : "not-allowed",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    transition: "all 0.2s ease"
-                  }}
                 >
-                  <Send className="icon" style={{ width: 16, height: 16 }} />
+                  <Send className="icon" style={{ width: 18, height: 18, position: "relative", zIndex: 1 }} />
                 </button>
               </form>
             </div>
