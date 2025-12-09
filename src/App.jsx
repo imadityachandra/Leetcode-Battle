@@ -29,13 +29,19 @@ import {
   Target,
   Award,
   MessageCircle,
-  Send
+  Send,
+  Phone,
+  PhoneOff,
+  Mic,
+  MicOff,
+  Volume2 as Volume2Icon,
+  VolumeX
 } from "lucide-react";
 
 // Firebase (avoid duplicate init)
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "firebase/auth";
-import { getFirestore, doc, setDoc, onSnapshot, getDoc, deleteField } from "firebase/firestore";
+import { getFirestore, doc, setDoc, onSnapshot, getDoc, deleteField, collection, query, where, orderBy, limit } from "firebase/firestore";
 
 /**
  * ========== CONFIGURATION ==========
@@ -149,6 +155,19 @@ export default function App() {
   const [messages, setMessages] = useState([]); // Array of { id, username, text, timestamp }
   const [newMessage, setNewMessage] = useState(""); // Current message input
   const chatMessagesEndRef = useRef(null); // Ref for auto-scrolling to bottom
+
+  // Voice call state
+  const [isInCall, setIsInCall] = useState(false);
+  const [isCallActive, setIsCallActive] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [isSpeakerMuted, setIsSpeakerMuted] = useState(false);
+  const [localStream, setLocalStream] = useState(null);
+  const [remoteStreams, setRemoteStreams] = useState(new Map()); // Map of username -> MediaStream
+  const [callParticipants, setCallParticipants] = useState([]); // Array of usernames in the call
+  const peerConnectionsRef = useRef(new Map());
+  const localStreamRef = useRef(null);
+  const signalingChannelRef = useRef(null);
+  const audioElementsRef = useRef(new Map()); // Map of username -> HTMLAudioElement
 
   // Firestore doc paths
   // Shared room path - all users access the same room data
@@ -1610,6 +1629,417 @@ export default function App() {
     }
   }, [messages]);
 
+  /* ---------------------------
+     WebRTC Voice Call Functions
+     --------------------------- */
+  
+  // WebRTC configuration (using public STUN servers)
+  const rtcConfig = {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' }
+    ]
+  };
+
+  // Get user media (microphone)
+  const getUserMedia = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        },
+        video: false 
+      });
+      localStreamRef.current = stream;
+      setLocalStream(stream);
+      return stream;
+    } catch (error) {
+      console.error("Error accessing microphone:", error);
+      setError("Failed to access microphone. Please check permissions.");
+      setTimeout(() => setError(null), 3000);
+      return null;
+    }
+  };
+
+  // Create peer connection for a user
+  const createPeerConnection = (username) => {
+    const pc = new RTCPeerConnection(rtcConfig);
+    
+    // Add local stream tracks
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track => {
+        pc.addTrack(track, localStreamRef.current);
+      });
+    }
+
+    // Handle remote stream
+    pc.ontrack = (event) => {
+      console.log(`[Voice] Received remote stream from ${username}`);
+      const [remoteStream] = event.streams;
+      
+      setRemoteStreams(prev => {
+        const newMap = new Map(prev);
+        newMap.set(username, remoteStream);
+        return newMap;
+      });
+
+      // Create audio element for remote stream
+      const audio = new Audio();
+      audio.srcObject = remoteStream;
+      audio.autoplay = true;
+      audio.volume = isSpeakerMuted ? 0 : 1;
+      audioElementsRef.current.set(username, audio);
+    };
+
+    // Handle ICE candidates
+    pc.onicecandidate = (event) => {
+      if (event.candidate && db && SHARED_ROOM_PATH) {
+        // Send ICE candidate via Firebase - use a document ID that includes both usernames
+        const signalingDocId = `signal_${currentLeetCodeUsername}_${username}_${Date.now()}`;
+        const signalingPath = `${SHARED_ROOM_PATH}/voiceSignaling/${signalingDocId}`;
+        setDoc(doc(db, signalingPath), {
+          from: currentLeetCodeUsername,
+          to: username,
+          type: 'ice-candidate',
+          candidate: event.candidate,
+          timestamp: Date.now()
+        }, { merge: true }).catch(err => console.error("Error sending ICE candidate:", err));
+      }
+    };
+
+    // Handle connection state changes
+    pc.onconnectionstatechange = () => {
+      console.log(`[Voice] Connection state with ${username}:`, pc.connectionState);
+      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        // Clean up on disconnect
+        cleanupPeerConnection(username);
+      }
+    };
+
+    peerConnectionsRef.current.set(username, pc);
+    return pc;
+  };
+
+  // Clean up peer connection
+  const cleanupPeerConnection = (username) => {
+    const pc = peerConnectionsRef.current.get(username);
+    if (pc) {
+      pc.close();
+      peerConnectionsRef.current.delete(username);
+    }
+    
+    const audio = audioElementsRef.current.get(username);
+    if (audio) {
+      audio.pause();
+      audio.srcObject = null;
+      audioElementsRef.current.delete(username);
+    }
+    
+    setRemoteStreams(prev => {
+      const newMap = new Map(prev);
+      newMap.delete(username);
+      return newMap;
+    });
+  };
+
+  // Start voice call
+  const startVoiceCall = async () => {
+    if (!currentLeetCodeUsername || !currentRoomId || !db) {
+      setError("Cannot start call: missing user info");
+      setTimeout(() => setError(null), 3000);
+      return;
+    }
+
+    if (friendUsernames.length === 0) {
+      setError("Add users to the room to start a voice call");
+      setTimeout(() => setError(null), 3000);
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setIsInCall(true);
+      setIsCallActive(false);
+
+      // Get user media
+      const stream = await getUserMedia();
+      if (!stream) {
+        setIsInCall(false);
+        setLoading(false);
+        return;
+      }
+
+      // Signaling will be handled by the useEffect listener below
+      signalingChannelRef.current = { active: true };
+
+      // Create peer connections for all other users in the room
+      const otherUsers = friendUsernames.filter(u => u !== currentLeetCodeUsername);
+      setCallParticipants([currentLeetCodeUsername, ...otherUsers]);
+
+      // Create offer for each peer
+      for (const username of otherUsers) {
+        const pc = createPeerConnection(username);
+        
+        // Create and send offer
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        // Send offer via Firebase - use unique document ID
+        const offerDocId = `offer_${currentLeetCodeUsername}_${username}_${Date.now()}`;
+        const offerPath = `${SHARED_ROOM_PATH}/voiceSignaling/${offerDocId}`;
+        await setDoc(doc(db, offerPath), {
+          from: currentLeetCodeUsername,
+          to: username,
+          type: 'offer',
+          offer: offer,
+          timestamp: Date.now()
+        }, { merge: true });
+      }
+
+      // Broadcast that we're in a call
+      await setDoc(doc(db, `${SHARED_ROOM_PATH}/voiceCall`), {
+        active: true,
+        participants: [currentLeetCodeUsername, ...otherUsers],
+        startedBy: currentLeetCodeUsername,
+        startedAt: Date.now()
+      }, { merge: true });
+
+      setIsCallActive(true);
+      setLoading(false);
+      playBeep();
+    } catch (error) {
+      console.error("[Voice] Error starting call:", error);
+      setError("Failed to start voice call");
+      setTimeout(() => setError(null), 3000);
+      endVoiceCall();
+      setLoading(false);
+    }
+  };
+
+  // End voice call
+  const endVoiceCall = async () => {
+    // Stop local stream
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track => track.stop());
+      localStreamRef.current = null;
+      setLocalStream(null);
+    }
+
+    // Close all peer connections
+    peerConnectionsRef.current.forEach((pc, username) => {
+      cleanupPeerConnection(username);
+    });
+    peerConnectionsRef.current.clear();
+    audioElementsRef.current.clear();
+
+    // Clear remote streams
+    setRemoteStreams(new Map());
+
+    // Clean up signaling
+    if (signalingChannelRef.current?.unsub) {
+      signalingChannelRef.current.unsub();
+      signalingChannelRef.current = null;
+    }
+
+    // Update Firebase
+    if (db && SHARED_ROOM_PATH) {
+      try {
+        await setDoc(doc(db, `${SHARED_ROOM_PATH}/voiceCall`), {
+          active: false,
+          endedAt: Date.now()
+        }, { merge: true });
+      } catch (err) {
+        console.error("Error updating call status:", err);
+      }
+    }
+
+    setIsInCall(false);
+    setIsCallActive(false);
+    setIsMuted(false);
+    setCallParticipants([]);
+    playBeep();
+  };
+
+  // Toggle mute
+  const toggleMute = () => {
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track => {
+        track.enabled = isMuted; // Toggle: if muted, enable; if not muted, disable
+      });
+      setIsMuted(!isMuted);
+      playBeep();
+    }
+  };
+
+  // Toggle speaker mute
+  const toggleSpeakerMute = () => {
+    const newMuted = !isSpeakerMuted;
+    setIsSpeakerMuted(newMuted);
+    
+    // Update all audio elements
+    audioElementsRef.current.forEach((audio) => {
+      audio.volume = newMuted ? 0 : 1;
+    });
+    playBeep();
+  };
+
+  // Listen for voice call signaling and handle WebRTC negotiation
+  useEffect(() => {
+    if (!db || !SHARED_ROOM_PATH || !currentRoomId || !currentLeetCodeUsername || !isInCall) {
+      return;
+    }
+
+    // Use collection query to listen for all signaling messages directed to current user
+    const signalingCollection = collection(db, `${SHARED_ROOM_PATH}/voiceSignaling`);
+    const q = query(
+      signalingCollection,
+      where('to', '==', currentLeetCodeUsername),
+      orderBy('timestamp', 'desc'),
+      limit(50)
+    );
+
+    const unsubSignaling = onSnapshot(q, async (snapshot) => {
+      snapshot.docChanges().forEach(async (change) => {
+        if (change.type !== 'added') return; // Only process new messages
+        
+        const data = change.doc.data();
+        const fromUser = data.from;
+        
+        if (!fromUser || fromUser === currentLeetCodeUsername) return;
+        
+        // Handle offer
+        if (data.type === 'offer' && data.offer) {
+          console.log(`[Voice] Received offer from ${fromUser}`);
+          
+          // Create peer connection if it doesn't exist
+          let pc = peerConnectionsRef.current.get(fromUser);
+          if (!pc) {
+            pc = createPeerConnection(fromUser);
+          }
+          
+          try {
+            // Set remote description
+            await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+            
+            // Create and send answer
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            
+            // Send answer via Firebase
+            const answerDocId = `answer_${currentLeetCodeUsername}_${fromUser}_${Date.now()}`;
+            const answerPath = `${SHARED_ROOM_PATH}/voiceSignaling/${answerDocId}`;
+            await setDoc(doc(db, answerPath), {
+              from: currentLeetCodeUsername,
+              to: fromUser,
+              type: 'answer',
+              answer: answer,
+              timestamp: Date.now()
+            }, { merge: true });
+          } catch (err) {
+            console.error(`[Voice] Error handling offer from ${fromUser}:`, err);
+          }
+        }
+        
+        // Handle answer
+        if (data.type === 'answer' && data.answer) {
+          console.log(`[Voice] Received answer from ${fromUser}`);
+          
+          const pc = peerConnectionsRef.current.get(fromUser);
+          if (pc && pc.signalingState !== 'stable') {
+            try {
+              await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+            } catch (err) {
+              console.error(`[Voice] Error handling answer from ${fromUser}:`, err);
+            }
+          }
+        }
+        
+        // Handle ICE candidate
+        if (data.type === 'ice-candidate' && data.candidate) {
+          const pc = peerConnectionsRef.current.get(fromUser);
+          if (pc) {
+            try {
+              await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+            } catch (err) {
+              console.error(`[Voice] Error adding ICE candidate from ${fromUser}:`, err);
+            }
+          }
+        }
+      });
+    }, (err) => {
+      console.error("[Voice] Signaling listener error:", err);
+    });
+
+    // Also listen for messages we sent (to handle answers and ICE candidates from others)
+    const qSent = query(
+      signalingCollection,
+      where('from', '==', currentLeetCodeUsername),
+      orderBy('timestamp', 'desc'),
+      limit(50)
+    );
+
+    const unsubSent = onSnapshot(qSent, async (snapshot) => {
+      snapshot.docChanges().forEach(async (change) => {
+        if (change.type !== 'added') return;
+        
+        const data = change.doc.data();
+        const toUser = data.to;
+        
+        if (!toUser || toUser === currentLeetCodeUsername) return;
+        
+        // Handle answer (response to our offer)
+        if (data.type === 'answer' && data.answer) {
+          // This shouldn't happen as we're the sender, but handle it just in case
+          console.log(`[Voice] Received our own answer - this shouldn't happen`);
+        }
+        
+        // Handle ICE candidate (from the other user responding to our offer)
+        // This is handled by the main listener above
+      });
+    }, (err) => {
+      console.error("[Voice] Sent signaling listener error:", err);
+    });
+
+    return () => {
+      unsubSignaling();
+      unsubSent();
+    };
+  }, [db, SHARED_ROOM_PATH, currentRoomId, currentLeetCodeUsername, friendUsernames, isInCall]);
+
+  // Listen for voice call status from other users
+  useEffect(() => {
+    if (!db || !SHARED_ROOM_PATH || !currentRoomId) return;
+
+    const callRef = doc(db, `${SHARED_ROOM_PATH}/voiceCall`);
+    const unsub = onSnapshot(callRef, (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        if (data.active && data.participants) {
+          // If someone else started a call and we're not in it, we could auto-join
+          // For now, we'll just show that a call is active
+          if (!isInCall && data.startedBy !== currentLeetCodeUsername) {
+            // Optionally auto-join or show notification
+            console.log(`[Voice] Call active in room started by ${data.startedBy}`);
+          }
+        }
+      }
+    });
+
+    return () => unsub();
+  }, [db, SHARED_ROOM_PATH, currentRoomId, currentLeetCodeUsername, isInCall]);
+
+  // Cleanup on unmount or room change
+  useEffect(() => {
+    return () => {
+      if (isInCall) {
+        endVoiceCall();
+      }
+    };
+  }, [currentRoomId]); // Clean up when switching rooms
+
   // Ref to store checkSubmissions function for manual refresh
   const checkSubmissionsRef = useRef(null);
   const isCheckingRef = useRef(false);
@@ -2428,6 +2858,17 @@ export default function App() {
         [data-theme="neon"] .chat-send-btn { background: linear-gradient(90deg,#3b82f6,#8b5cf6); box-shadow: 0 4px 15px rgba(139,92,246,0.4); }
         [data-theme="neon"] .chat-send-btn:hover:not(:disabled) { box-shadow: 0 6px 20px rgba(139,92,246,0.6); }
 
+        /* voice call styles */
+        .voice-call-btn { transition: transform 0.2s ease, box-shadow 0.2s ease; }
+        .voice-call-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(6, 182, 212, 0.4); }
+        .voice-call-btn-end { transition: transform 0.2s ease, box-shadow 0.2s ease; }
+        .voice-call-btn-end:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4); }
+        .voice-call-controls { transition: all 0.3s ease; }
+        .voice-control-btn { transition: all 0.2s ease; }
+        .voice-control-btn:hover { transform: translateY(-1px); box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        [data-theme="dark"] .voice-call-controls { background: linear-gradient(135deg, #1e3a8a, #1e40af) !important; }
+        [data-theme="neon"] .voice-call-controls { background: linear-gradient(135deg, #312e81, #4c1d95) !important; box-shadow: 0 0 15px rgba(139, 92, 246, 0.3); }
+
         /* responsive tweaks */
         @media(max-width: 640px) {
           .header { flex-direction:column; align-items:flex-start; gap:10px; }
@@ -2711,10 +3152,146 @@ export default function App() {
                   <MessageCircle className="icon" style={{ width: 18, height: 18 }} />
                   <h3 style={{ margin: 0 }}>Room Chat</h3>
                 </div>
-                <div className="mini" style={{ fontSize: "11px", color: "var(--muted)" }}>
-                  {messages.length} {messages.length === 1 ? "message" : "messages"}
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div className="mini" style={{ fontSize: "11px", color: "var(--muted)" }}>
+                    {messages.length} {messages.length === 1 ? "message" : "messages"}
+                  </div>
+                  {!isInCall ? (
+                    <button
+                      className="voice-call-btn"
+                      onClick={startVoiceCall}
+                      disabled={friendUsernames.length === 0 || loading}
+                      title="Start voice call"
+                      style={{
+                        padding: "6px 12px",
+                        borderRadius: "8px",
+                        border: "0",
+                        background: "linear-gradient(90deg,#06b6d4,#7c3aed)",
+                        color: "white",
+                        cursor: friendUsernames.length === 0 || loading ? "not-allowed" : "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "6px",
+                        fontSize: "12px",
+                        fontWeight: 600,
+                        opacity: friendUsernames.length === 0 || loading ? 0.5 : 1
+                      }}
+                    >
+                      <Phone className="icon" style={{ width: 14, height: 14 }} />
+                      Call
+                    </button>
+                  ) : (
+                    <button
+                      className="voice-call-btn-end"
+                      onClick={endVoiceCall}
+                      title="End call"
+                      style={{
+                        padding: "6px 12px",
+                        borderRadius: "8px",
+                        border: "0",
+                        background: "#ef4444",
+                        color: "white",
+                        cursor: "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "6px",
+                        fontSize: "12px",
+                        fontWeight: 600
+                      }}
+                    >
+                      <PhoneOff className="icon" style={{ width: 14, height: 14 }} />
+                      End
+                    </button>
+                  )}
                 </div>
               </div>
+
+              {/* Voice Call Controls */}
+              {isInCall && (
+                <div className="voice-call-controls" style={{
+                  padding: "12px",
+                  marginBottom: "12px",
+                  borderRadius: "8px",
+                  background: isCallActive ? "linear-gradient(135deg, #dbeafe, #e0f2fe)" : "var(--card)",
+                  border: `1px solid ${isCallActive ? "#3b82f6" : "var(--border)"}`,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "8px"
+                }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div style={{ fontSize: "13px", fontWeight: 600, color: "var(--text)" }}>
+                      {isCallActive ? "🔊 Call Active" : "⏳ Connecting..."}
+                    </div>
+                    <div style={{ fontSize: "11px", color: "var(--muted)" }}>
+                      {callParticipants.length} {callParticipants.length === 1 ? "participant" : "participants"}
+                    </div>
+                  </div>
+                  
+                  {isCallActive && (
+                    <div style={{ display: "flex", gap: "8px", justifyContent: "center" }}>
+                      <button
+                        className="voice-control-btn"
+                        onClick={toggleMute}
+                        title={isMuted ? "Unmute" : "Mute"}
+                        style={{
+                          padding: "8px 16px",
+                          borderRadius: "8px",
+                          border: "1px solid var(--border)",
+                          background: isMuted ? "#ef4444" : "var(--card)",
+                          color: isMuted ? "white" : "var(--text)",
+                          cursor: "pointer",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "6px",
+                          fontSize: "12px",
+                          fontWeight: 600,
+                          transition: "all 0.2s ease"
+                        }}
+                      >
+                        {isMuted ? (
+                          <MicOff className="icon" style={{ width: 14, height: 14 }} />
+                        ) : (
+                          <Mic className="icon" style={{ width: 14, height: 14 }} />
+                        )}
+                        {isMuted ? "Unmute" : "Mute"}
+                      </button>
+                      
+                      <button
+                        className="voice-control-btn"
+                        onClick={toggleSpeakerMute}
+                        title={isSpeakerMuted ? "Unmute speaker" : "Mute speaker"}
+                        style={{
+                          padding: "8px 16px",
+                          borderRadius: "8px",
+                          border: "1px solid var(--border)",
+                          background: isSpeakerMuted ? "#f59e0b" : "var(--card)",
+                          color: isSpeakerMuted ? "white" : "var(--text)",
+                          cursor: "pointer",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "6px",
+                          fontSize: "12px",
+                          fontWeight: 600,
+                          transition: "all 0.2s ease"
+                        }}
+                      >
+                        {isSpeakerMuted ? (
+                          <VolumeX className="icon" style={{ width: 14, height: 14 }} />
+                        ) : (
+                          <Volume2Icon className="icon" style={{ width: 14, height: 14 }} />
+                        )}
+                        {isSpeakerMuted ? "Unmute" : "Mute"} Speaker
+                      </button>
+                    </div>
+                  )}
+                  
+                  {callParticipants.length > 0 && (
+                    <div style={{ fontSize: "11px", color: "var(--muted)", marginTop: "4px" }}>
+                      Participants: {callParticipants.join(", ")}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Messages List */}
               <div className="chat-messages" style={{ 
