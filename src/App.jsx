@@ -41,7 +41,7 @@ import {
 // Firebase (avoid duplicate init)
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "firebase/auth";
-import { getFirestore, doc, setDoc, onSnapshot, getDoc, deleteField, collection, query, where, orderBy, limit } from "firebase/firestore";
+import { getFirestore, doc, setDoc, onSnapshot, getDoc, deleteField, collection, query, where, orderBy, limit, getDocs } from "firebase/firestore";
 
 /**
  * ========== CONFIGURATION ==========
@@ -143,6 +143,12 @@ export default function App() {
   const [currentLeetCodeUsername, setCurrentLeetCodeUsername] = useState(() => {
     return localStorage.getItem("lb_leetcodeUsername") || "";
   });
+  
+  // Warning modal for duplicate room names
+  const [showDuplicateRoomWarning, setShowDuplicateRoomWarning] = useState(false);
+  const [duplicateRoomInfo, setDuplicateRoomInfo] = useState(null); // { id, name, usernames }
+  const [pendingRoomName, setPendingRoomName] = useState("");
+  const [pendingUsername, setPendingUsername] = useState("");
   
   // War state
   const [warState, setWarState] = useState(null); // { active: bool, problemLink: string, problemSlug: string, startTime: number, duration: number, winner: string, submissions: {} }
@@ -348,11 +354,39 @@ export default function App() {
     }
   }, [db]);
 
-  // Check if room exists by name in Firebase
+  // Check if room exists by name in Firebase (checks actual name, not just normalized ID)
   const checkRoomExistsByName = useCallback(async (roomName) => {
     if (!db) return null;
+    
+    // First check by normalized ID (for backwards compatibility)
     const normalizedId = normalizeRoomName(roomName);
-    return await fetchSharedRoom(normalizedId);
+    const roomById = await fetchSharedRoom(normalizedId);
+    if (roomById) {
+      // Check if the name matches (case-insensitive)
+      if (roomById.name && roomById.name.toLowerCase() === roomName.toLowerCase()) {
+        return roomById;
+      }
+    }
+    
+    // Also check all rooms by actual name (case-insensitive)
+    try {
+      const roomsCollectionPath = typeof __app_id !== "undefined"
+        ? `/artifacts/${appId}/rooms`
+        : `rooms`;
+      const roomsRef = collection(db, roomsCollectionPath);
+      const roomsSnapshot = await getDocs(roomsRef);
+      
+      for (const roomDoc of roomsSnapshot.docs) {
+        const roomData = roomDoc.data();
+        if (roomData.name && roomData.name.toLowerCase() === roomName.toLowerCase()) {
+          return { id: roomDoc.id, ...roomData };
+        }
+      }
+    } catch (e) {
+      console.error("Error checking rooms by name:", e);
+    }
+    
+    return null;
   }, [db, normalizeRoomName, fetchSharedRoom]);
 
   // Load user's local rooms list from Firebase (for UI)
@@ -1170,44 +1204,14 @@ export default function App() {
     // Check if room already exists in Firebase
     const existingRoom = await checkRoomExistsByName(name);
     if (existingRoom) {
-      // Room exists in Firebase - join it instead
-      setRooms(prev => {
-        const exists = prev.some(r => r.id === normalizedId);
-        if (!exists) {
-          const newRooms = [...prev, {
-            id: normalizedId,
-            name: existingRoom.name || name, // Use Firebase name if available, otherwise use provided name
-            usernames: existingRoom.usernames || []
-          }];
-          saveUserRooms(newRooms);
-          return newRooms;
-        }
-        return prev;
-      });
-      setCurrentRoomId(normalizedId);
-      // Add username to room if provided
-      if (username) {
-        const updatedUsernames = [...(existingRoom.usernames || [])];
-        if (!updatedUsernames.includes(username)) {
-          updatedUsernames.push(username);
-          // Save to Firebase directly
-          const roomPath = typeof __app_id !== "undefined"
-            ? `/artifacts/${appId}/rooms/${normalizedId}`
-            : `rooms/${normalizedId}`;
-          await setDoc(doc(db, roomPath), {
-            id: normalizedId,
-            name: existingRoom.name || name, // Preserve Firebase name if it exists
-            usernames: updatedUsernames
-          }, { merge: true });
-          setFriendUsernames(updatedUsernames);
-        } else {
-          setFriendUsernames(updatedUsernames);
-        }
-      }
+      // Room exists - show warning modal instead of auto-joining
+      setDuplicateRoomInfo(existingRoom);
+      setPendingRoomName(name);
+      setPendingUsername(username);
+      setShowDuplicateRoomWarning(true);
       setNewRoomName("");
       setShowRoomModal(false);
-      playBeep();
-      return;
+      return { duplicate: true }; // Return indicator that duplicate was found
     }
     
     // Create new room
@@ -1243,6 +1247,127 @@ export default function App() {
     }
   };
 
+  // Join existing room after user confirms in warning modal
+  const joinExistingRoom = async () => {
+    try {
+      if (!duplicateRoomInfo || !db) return;
+      
+      const normalizedId = normalizeRoomName(pendingRoomName);
+      const username = pendingUsername || currentLeetCodeUsername;
+      
+      // Add room to local list if not already present
+      setRooms(prev => {
+        const exists = prev.some(r => r.id === duplicateRoomInfo.id || r.id === normalizedId);
+        if (!exists) {
+          const newRooms = [...prev, {
+            id: duplicateRoomInfo.id || normalizedId,
+            name: duplicateRoomInfo.name || pendingRoomName,
+            usernames: duplicateRoomInfo.usernames || []
+          }];
+          saveUserRooms(newRooms);
+          return newRooms;
+        }
+        return prev;
+      });
+      
+      // Switch to the existing room
+      setCurrentRoomId(duplicateRoomInfo.id || normalizedId);
+      
+      // Add username to room if provided
+      if (username) {
+        const updatedUsernames = [...(duplicateRoomInfo.usernames || [])];
+        if (!updatedUsernames.includes(username)) {
+          updatedUsernames.push(username);
+          // Save to Firebase directly
+          const roomPath = typeof __app_id !== "undefined"
+            ? `/artifacts/${appId}/rooms/${duplicateRoomInfo.id || normalizedId}`
+            : `rooms/${duplicateRoomInfo.id || normalizedId}`;
+          await setDoc(doc(db, roomPath), {
+            id: duplicateRoomInfo.id || normalizedId,
+            name: duplicateRoomInfo.name || pendingRoomName,
+            usernames: updatedUsernames
+          }, { merge: true });
+          setFriendUsernames(updatedUsernames);
+        } else {
+          setFriendUsernames(updatedUsernames);
+        }
+      }
+      
+      // Close warning modal
+      setShowDuplicateRoomWarning(false);
+      setDuplicateRoomInfo(null);
+      setPendingRoomName("");
+      setPendingUsername("");
+      playBeep();
+    } catch (error) {
+      console.error("Error joining existing room:", error);
+      setError(`Failed to join room: ${error.message || "Unknown error"}`);
+      setTimeout(() => setError(null), 3000);
+    }
+  };
+
+  // Cancel joining existing room
+  const cancelJoinRoom = () => {
+    setShowDuplicateRoomWarning(false);
+    setDuplicateRoomInfo(null);
+    setPendingRoomName("");
+    setPendingUsername("");
+  };
+
+  // Exit/Leave a room
+  const exitRoom = async (roomId) => {
+    try {
+      if (!db || !currentLeetCodeUsername) return;
+      
+      const room = rooms.find(r => r.id === roomId);
+      if (!room) return;
+      
+      // Remove username from room's usernames list
+      const updatedUsernames = (room.usernames || []).filter(u => u !== currentLeetCodeUsername);
+      
+      // Update Firebase
+      const roomPath = typeof __app_id !== "undefined"
+        ? `/artifacts/${appId}/rooms/${roomId}`
+        : `rooms/${roomId}`;
+      
+      if (updatedUsernames.length === 0) {
+        // If no users left, optionally delete the room or just clear usernames
+        await setDoc(doc(db, roomPath), {
+          id: roomId,
+          name: room.name,
+          usernames: []
+        }, { merge: true });
+      } else {
+        await setDoc(doc(db, roomPath), {
+          id: roomId,
+          name: room.name,
+          usernames: updatedUsernames
+        }, { merge: true });
+      }
+      
+      // Remove room from local list
+      const updatedRooms = rooms.filter(r => r.id !== roomId);
+      await saveUserRooms(updatedRooms);
+      
+      // If exiting current room, switch to another room or clear selection
+      if (roomId === currentRoomId) {
+        if (updatedRooms.length > 0) {
+          setCurrentRoomId(updatedRooms[0].id);
+        } else {
+          setCurrentRoomId(null);
+          setFriendUsernames([]);
+          setMessages([]); // Clear messages when leaving room
+        }
+      }
+      
+      playBeep();
+    } catch (error) {
+      console.error("Error exiting room:", error);
+      setError(`Failed to exit room: ${error.message || "Unknown error"}`);
+      setTimeout(() => setError(null), 3000);
+    }
+  };
+
   // Initial setup handler
   const handleInitialSetup = async () => {
     try {
@@ -1273,14 +1398,24 @@ export default function App() {
       localStorage.setItem("lb_leetcodeUsername", username);
       setCurrentLeetCodeUsername(username);
       
-      // Create or join room
-      await createRoom(roomName, username);
-      
-      // Close setup modal
-      setShowInitialSetup(false);
-      setAppStatus("Ready to battle");
-      setLoading(false);
-      playBeep();
+      // Create or join room - this may show warning modal if room exists
+      try {
+        const result = await createRoom(roomName, username);
+        // Only close setup modal if room was actually created (not showing warning)
+        if (!result || !result.duplicate) {
+          setShowInitialSetup(false);
+          setAppStatus("Ready to battle");
+          setLoading(false);
+          playBeep();
+        } else {
+          // Warning modal will be shown, keep loading false but don't close setup yet
+          setLoading(false);
+          setAppStatus("Room exists");
+        }
+      } catch (error) {
+        // Error already handled in createRoom
+        setLoading(false);
+      }
     } catch (error) {
       console.error("Error in initial setup:", error);
       setError(`Failed to start: ${error.message || "Unknown error"}`);
@@ -3344,6 +3479,57 @@ export default function App() {
         </div>
       )}
 
+      {/* Duplicate Room Warning Modal */}
+      {showDuplicateRoomWarning && duplicateRoomInfo && (
+        <div className="modal-overlay">
+          <div className="modal-content">
+            <div className="modal-title" style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+              <AlertTriangle style={{ color: "#f59e0b", width: 24, height: 24 }} />
+              Room Already Exists
+            </div>
+            <p style={{ marginBottom: "16px", color: "var(--muted)", lineHeight: "1.6" }}>
+              A room with the name <strong style={{ color: "var(--text)" }}>"{duplicateRoomInfo.name || pendingRoomName}"</strong> already exists.
+            </p>
+            <p style={{ marginBottom: "20px", color: "var(--muted)", fontSize: "14px", lineHeight: "1.6" }}>
+              You will be added to this existing room. If you want to create a new room, please use a different name.
+            </p>
+            {duplicateRoomInfo.usernames && duplicateRoomInfo.usernames.length > 0 && (
+              <div style={{ 
+                marginBottom: "20px", 
+                padding: "12px", 
+                background: "var(--sky-50)", 
+                borderRadius: "8px",
+                border: "1px solid var(--border)"
+              }}>
+                <div style={{ fontSize: "13px", fontWeight: 600, marginBottom: "8px", color: "var(--text)" }}>
+                  Current members ({duplicateRoomInfo.usernames.length}):
+                </div>
+                <div style={{ fontSize: "12px", color: "var(--muted)", display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                  {duplicateRoomInfo.usernames.map((u, idx) => (
+                    <span key={idx} style={{ 
+                      padding: "4px 8px", 
+                      background: "var(--card)", 
+                      borderRadius: "6px",
+                      border: "1px solid var(--border)"
+                    }}>
+                      {u}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div className="modal-actions">
+              <button className="modal-btn modal-btn-primary" onClick={joinExistingRoom}>
+                Join Existing Room
+              </button>
+              <button className="modal-btn modal-btn-secondary" onClick={cancelJoinRoom}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Join Room Modal */}
       {showJoinModal && (
         <div className="modal-overlay">
@@ -3444,6 +3630,14 @@ export default function App() {
                           <>
                             <button className="room-btn-small" onClick={() => startEditRoom(room.id)} title="Rename">
                               <Edit className="icon" style={{ width: 14, height: 14 }} />
+                            </button>
+                            <button 
+                              className="room-btn-small" 
+                              onClick={(e) => { e.stopPropagation(); exitRoom(room.id); }} 
+                              title="Exit Room"
+                              style={{ color: "var(--error, #ef4444)" }}
+                            >
+                              <DoorOpen className="icon" style={{ width: 14, height: 14 }} />
                             </button>
                             {rooms.length > 1 && (
                               <button className="room-btn-small" onClick={() => deleteRoom(room.id)} title="Delete">
