@@ -43,6 +43,10 @@ import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "firebase/auth";
 import { getFirestore, doc, setDoc, onSnapshot, getDoc, deleteField, collection, query, where, orderBy, limit, getDocs } from "firebase/firestore";
 import { SignalingTester } from "./utils/signalingTester";
+import { fetchWithCache, clearCache } from "./utils/apiCache";
+import { sanitizeInput, sanitizeUsername, sanitizeRoomName, sanitizeChatMessage } from "./utils/sanitize";
+import { validateLeetCodeUsername } from "./utils/validateUsername";
+
 
 /**
  * ========== CONFIGURATION ==========
@@ -185,7 +189,7 @@ export default function App() {
   const localStreamRef = useRef(null);
   const signalingChannelRef = useRef(null);
   const [audioUnlockNeeded, setAudioUnlockNeeded] = useState(false); // State to show unlock button if autoplay fails
-  const [debugInfo, setDebugInfo] = useState({}); // Map of username -> { connectionState, signalingState, iceCandidatesCount }
+
   const audioElementsRef = useRef(new Map()); // Map of username -> HTMLAudioElement
 
   // Firestore doc paths
@@ -305,6 +309,53 @@ export default function App() {
       localStorage.setItem("lb_currentRoom", currentRoomId);
     }
   }, [currentRoomId]);
+
+  // Handle URL parameter changes (for shared links)
+  // This allows users to switch rooms by clicking a shared link
+  useEffect(() => {
+    const checkUrlForRoom = () => {
+      const params = new URLSearchParams(window.location.search);
+      const urlRoomId = params.get("room");
+
+      // If there's a room parameter in the URL and it's different from current room
+      if (urlRoomId && urlRoomId !== currentRoomId) {
+        console.log(`[Room Switch] Detected room parameter in URL: ${urlRoomId}, current room: ${currentRoomId}`);
+
+        // If user has a username, switch to the new room
+        if (currentLeetCodeUsername) {
+          console.log(`[Room Switch] Switching to room: ${urlRoomId}`);
+          setCurrentRoomId(urlRoomId);
+
+          // Clear the URL parameter after switching (optional, keeps URL clean)
+          window.history.replaceState({}, '', window.location.pathname);
+        } else {
+          // If no username, show join modal
+          console.log(`[Room Switch] No username, showing join modal`);
+          setShowJoinModal(true);
+        }
+      }
+    };
+
+    // Check on mount and when dependencies change
+    checkUrlForRoom();
+
+    // Listen for browser back/forward navigation
+    const handlePopState = () => {
+      console.log('[Room Switch] Browser navigation detected');
+      checkUrlForRoom();
+    };
+    window.addEventListener('popstate', handlePopState);
+
+    // Also check periodically in case URL changes programmatically
+    // This handles cases where user clicks a link on the same page
+    const intervalId = setInterval(checkUrlForRoom, 1000);
+
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+      clearInterval(intervalId);
+    };
+  }, [currentRoomId, currentLeetCodeUsername]); // Re-run when room or username changes
+
 
   // Save user's local rooms list to Firebase (for UI)
   const saveUserRooms = useCallback(async (roomsData) => {
@@ -785,56 +836,34 @@ export default function App() {
   }, [db, SHARED_ROOM_PATH, currentRoomId, saveSharedRoom, rooms]);
 
   /* ---------------------------
-     Fetch helpers
+     Fetch helpers with caching and rate limiting
      --------------------------- */
-  const fetchWithRetry = useCallback(async (url) => {
-    let tries = 0;
-    while (tries < 2) { // Reduced retries to avoid hitting limits
-      try {
-        // Add cache-busting parameter to ensure fresh data
-        const separator = url.includes('?') ? '&' : '?';
-        const cacheBustUrl = `${url}${separator}_t=${Date.now()}`;
+  const fetchWithRetry = useCallback(async (url, options = {}) => {
+    const {
+      ttl = 60000, // Default 1 minute cache
+      forceRefresh = false
+    } = options;
 
-        // Add no-cache headers to prevent browser/CDN caching
-        const res = await fetch(cacheBustUrl, {
-          method: 'GET',
-          headers: {
-            'Cache-Control': 'no-cache, no-store, must-revalidate',
-            'Pragma': 'no-cache',
-            'Expires': '0'
-          },
-          cache: 'no-store' // Force fetch to bypass cache
-        });
+    try {
+      const data = await fetchWithCache(url, { ttl, forceRefresh, retries: 2 });
 
-        if (res.status === 429) {
-          // Rate limited - throw immediately without retry
-          const errorText = await res.text().catch(() => "");
-          console.warn("Rate limited (429), skipping request", errorText);
-          throw new Error("Rate limited");
+      // Log API response for debugging (submissions only)
+      if (url.includes('/submission')) {
+        console.log(`[API] Fetched ${Array.isArray(data) ? data.length : 'unknown'} submissions from ${url}`);
+        if (Array.isArray(data) && data.length > 0) {
+          console.log(`[API] Latest submission:`, {
+            title: data[0].title,
+            titleSlug: data[0].titleSlug,
+            status: data[0].statusDisplay || data[0].status || data[0].statusCode,
+            timestamp: new Date(parseInt(data[0].timestamp || "0", 10) * 1000).toISOString()
+          });
         }
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-
-        // Log API response for debugging
-        if (url.includes('/submission')) {
-          console.log(`[API] Fetched ${Array.isArray(data) ? data.length : 'unknown'} submissions from ${url}`);
-          if (Array.isArray(data) && data.length > 0) {
-            console.log(`[API] Latest submission:`, {
-              title: data[0].title,
-              titleSlug: data[0].titleSlug,
-              status: data[0].statusDisplay || data[0].status || data[0].statusCode,
-              timestamp: new Date(parseInt(data[0].timestamp || "0", 10) * 1000).toISOString()
-            });
-          }
-        }
-
-        return data;
-      } catch (e) {
-        tries++;
-        if (tries >= 2 || e.message === "Rate limited") throw e;
-        // Longer delay between retries
-        await new Promise(r => setTimeout(r, 1000 * Math.pow(2, tries)));
       }
+
+      return data;
+    } catch (error) {
+      console.error(`[API] Failed to fetch ${url}:`, error.message);
+      throw error;
     }
   }, []);
 
@@ -860,7 +889,7 @@ export default function App() {
   /* ---------------------------
      Fetch leaderboard data
      --------------------------- */
-  const fetchAllUsersData = useCallback(async () => {
+  const fetchAllUsersData = useCallback(async (forceRefresh = false) => {
     if (!currentUserId) {
       setLeaderboardData([]);
       if (friendUsernames.length === 0) setAppStatus("Add usernames to start");
@@ -877,9 +906,9 @@ export default function App() {
     const promises = friendUsernames.map(async (user) => {
       try {
         const [profile, solved, submission] = await Promise.all([
-          fetchWithRetry(`${API_BASE_URL}/${user}`),
-          fetchWithRetry(`${API_BASE_URL}/${user}/solved`),
-          fetchWithRetry(`${API_BASE_URL}/${user}/submission?limit=10`)
+          fetchWithRetry(`${API_BASE_URL}/${user}`, { forceRefresh }),
+          fetchWithRetry(`${API_BASE_URL}/${user}/solved`, { forceRefresh }),
+          fetchWithRetry(`${API_BASE_URL}/${user}/submission?limit=10`, { forceRefresh })
         ]);
         if (profile?.errors || solved?.errors) return { username: user, error: true };
         const { daily, weekly } = processRecentSubmissions(submission);
@@ -1155,19 +1184,51 @@ export default function App() {
      --------------------------- */
   const createRoom = async (roomName = null, leetcodeUsername = null) => {
     try {
+      console.log('[Room Creation] Starting room creation...', { roomName, leetcodeUsername, db: !!db });
+
       if (!db) {
-        throw new Error("Database not ready. Please wait...");
+        const errorMsg = "Database not ready. Please wait a moment and try again...";
+        console.error('[Room Creation]', errorMsg);
+        setError(errorMsg);
+        setTimeout(() => setError(null), 3000);
+        return;
       }
 
-      const name = (roomName || newRoomName).trim();
-      if (!name) {
-        setError("Room name is required");
-        setTimeout(() => setError(null), 2200);
+      // Sanitize room name to prevent XSS and ensure valid characters
+      const rawName = (roomName || newRoomName).trim();
+      const name = sanitizeRoomName(rawName);
+
+      if (!name || name.length === 0) {
+        const errorMsg = "Room name is required and must contain valid characters";
+        console.error('[Room Creation]', errorMsg);
+        setError(errorMsg);
+        setTimeout(() => setError(null), 3000);
+        return;
+      }
+
+      if (name.length < 3) {
+        const errorMsg = "Room name must be at least 3 characters";
+        console.error('[Room Creation]', errorMsg);
+        setError(errorMsg);
+        setTimeout(() => setError(null), 3000);
         return;
       }
 
       // Use provided username or current LeetCode username
       const username = leetcodeUsername || currentLeetCodeUsername;
+
+      // Sanitize username
+      const sanitizedUsername = username ? sanitizeUsername(username) : null;
+
+      if (!username) {
+        const errorMsg = "Please set your LeetCode username first in the 'Manage Squad' section";
+        console.error('[Room Creation]', errorMsg);
+        setError(errorMsg);
+        setTimeout(() => setError(null), 3000);
+        return;
+      }
+
+      console.log('[Room Creation] Creating room:', { name, username });
 
       // Normalize room name to create unique ID
       const normalizedId = normalizeRoomName(name);
@@ -1177,6 +1238,7 @@ export default function App() {
         r.id === normalizedId || r.name.toLowerCase() === name.toLowerCase()
       );
       if (localDuplicate) {
+        console.log('[Room Creation] Local duplicate found, switching to existing room:', localDuplicate.id);
         // Switch to existing room instead of creating duplicate
         setCurrentRoomId(localDuplicate.id);
         // Add username if provided and not already in room
@@ -1215,12 +1277,15 @@ export default function App() {
         setNewRoomName("");
         setShowRoomModal(false);
         playBeep();
+        console.log('[Room Creation] Switched to existing room successfully');
         return;
       }
 
       // Check if room already exists in Firebase
+      console.log('[Room Creation] Checking Firebase for existing room...');
       const existingRoom = await checkRoomExistsByName(name);
       if (existingRoom) {
+        console.log('[Room Creation] Firebase duplicate found, showing warning');
         // Room exists - show warning modal instead of auto-joining
         setDuplicateRoomInfo(existingRoom);
         setPendingRoomName(name);
@@ -1232,6 +1297,7 @@ export default function App() {
       }
 
       // Create new room
+      console.log('[Room Creation] Creating new room in Firebase...');
       const newRoom = {
         id: normalizedId,
         name,
@@ -1256,8 +1322,9 @@ export default function App() {
       setNewRoomName("");
       setShowRoomModal(false);
       playBeep();
+      console.log('[Room Creation] Room created successfully:', newRoom.id);
     } catch (error) {
-      console.error("Error creating room:", error);
+      console.error("[Room Creation] Error creating room:", error);
       setError(`Failed to create room: ${error.message || "Unknown error"}`);
       setTimeout(() => setError(null), 3000);
       throw error; // Re-throw so caller can handle it
@@ -1626,7 +1693,50 @@ export default function App() {
   // Note: LeetCode GraphQL API has CORS restrictions, so we use a curated list
   const getRandomProblem = async () => {
     try {
-      // Comprehensive list of popular problems by difficulty
+      const difficulty = warDifficulty || "any";
+      console.log(`[Problem Selection] Fetching ${difficulty} problems from API...`);
+
+      // Try to fetch from API first
+      try {
+        // Fetch problems from API with difficulty filter
+        const difficultyParam = difficulty !== "any" ? `?difficulty=${difficulty.toUpperCase()}` : "";
+        const apiUrl = `${API_BASE_URL}/problems${difficultyParam}&limit=50`;
+
+        console.log(`[Problem Selection] API URL: ${apiUrl}`);
+        const problemsData = await fetchWithRetry(apiUrl, { ttl: 300000 }); // Cache for 5 minutes
+
+        if (problemsData && problemsData.problemsetQuestionList) {
+          const problems = problemsData.problemsetQuestionList;
+
+          if (problems.length > 0) {
+            // Filter out recently used problems
+            const recentProblems = usedProblems.slice(-20);
+            const availableProblems = problems.filter(p => !recentProblems.includes(p.titleSlug));
+            const problemsToChooseFrom = availableProblems.length > 0 ? availableProblems : problems;
+
+            // Select random problem
+            const randomIndex = Math.floor(Math.random() * problemsToChooseFrom.length);
+            const selectedProblem = problemsToChooseFrom[randomIndex];
+
+            // Track this problem as used
+            setUsedProblems(prev => [...prev, selectedProblem.titleSlug].slice(-20));
+
+            console.log(`[Problem Selection] Selected from API: ${selectedProblem.titleSlug} (${selectedProblem.difficulty})`);
+
+            return {
+              link: `https://leetcode.com/problems/${selectedProblem.titleSlug}/`,
+              slug: selectedProblem.titleSlug,
+              title: selectedProblem.title,
+              difficulty: selectedProblem.difficulty || difficulty.toUpperCase()
+            };
+          }
+        }
+      } catch (apiError) {
+        console.warn(`[Problem Selection] API fetch failed, falling back to curated list:`, apiError.message);
+      }
+
+      // Fallback to curated list if API fails
+      console.log(`[Problem Selection] Using curated list as fallback`);
       const problemLists = {
         easy: [
           "two-sum", "reverse-linked-list", "merge-two-sorted-lists", "maximum-subarray",
@@ -1664,7 +1774,6 @@ export default function App() {
         ]
       };
 
-      const difficulty = warDifficulty || "any";
       const difficultyList = problemLists[difficulty] || problemLists.any;
 
       // Filter out recently used problems
@@ -1687,7 +1796,7 @@ export default function App() {
         any: "MEDIUM"
       };
 
-      console.log(`[Problem Selection] Selected random problem: ${selectedSlug} (${difficulty}) from ${problemsToChooseFrom.length} available problems`);
+      console.log(`[Problem Selection] Selected from curated list: ${selectedSlug} (${difficulty})`);
 
       return {
         link: `https://leetcode.com/problems/${selectedSlug}/`,
@@ -1708,14 +1817,62 @@ export default function App() {
     }
   };
 
+  // Ref to prevent concurrent war starts
+  const isStartingWar = useRef(false);
+
   // Start war
   const startWar = async () => {
     try {
-      if (friendUsernames.length === 0) {
-        setError("Add usernames to start a war!");
+      console.log('[War Start] Attempting to start war...', { participants: friendUsernames.length });
+
+      // Check if already starting a war
+      if (isStartingWar.current) {
+        setError("War is already being started. Please wait...");
         setTimeout(() => setError(null), 2200);
         return;
       }
+
+      // Check if war is already active
+      if (warState && warState.active) {
+        setError("A war is already in progress. Cancel it first.");
+        setTimeout(() => setError(null), 2200);
+        return;
+      }
+
+      // Validate minimum participants (at least 2 for a battle)
+      if (friendUsernames.length < 2) {
+        setError("Need at least 2 participants to start a war! Add more fighters.");
+        setTimeout(() => setError(null), 3000);
+        return;
+      }
+
+      // Validate maximum participants (API rate limiting)
+      if (friendUsernames.length > 10) {
+        setError("Maximum 10 participants allowed per war");
+        setTimeout(() => setError(null), 3000);
+        return;
+      }
+
+      // Check for empty usernames
+      const emptyUsernames = friendUsernames.filter(u => !u || u.trim() === '');
+      if (emptyUsernames.length > 0) {
+        setError("Remove empty usernames before starting war");
+        setTimeout(() => setError(null), 3000);
+        return;
+      }
+
+      // Check for duplicate usernames
+      const uniqueUsernames = new Set(friendUsernames.map(u => u.toLowerCase()));
+      if (uniqueUsernames.size !== friendUsernames.length) {
+        setError("Remove duplicate usernames before starting war");
+        setTimeout(() => setError(null), 3000);
+        return;
+      }
+
+      console.log('[War Start] Validation passed, starting war...');
+
+      // Set lock to prevent concurrent starts
+      isStartingWar.current = true;
 
       // Set loading state to prevent UI issues
       setLoading(true);
@@ -1765,9 +1922,10 @@ export default function App() {
       setAppStatus("War started!");
       playBeep();
 
-      // Reset flag after a delay to allow snapshot to process
+      // Reset flags after a delay to allow snapshot to process
       setTimeout(() => {
         isUpdatingRef.current = false;
+        isStartingWar.current = false; // Release lock
         setLoading(false);
       }, 1000);
     } catch (error) {
@@ -1777,6 +1935,7 @@ export default function App() {
       setLoading(false);
       setAppStatus("Error starting war");
       isUpdatingRef.current = false; // Reset flag on error
+      isStartingWar.current = false; // Release lock on error
 
       // Clear any partial war state
       setWarState(null);
@@ -1827,10 +1986,19 @@ export default function App() {
       return;
     }
 
+    // Sanitize message to prevent XSS attacks
+    const sanitizedText = sanitizeChatMessage(newMessage);
+
+    if (!sanitizedText || sanitizedText.length === 0) {
+      setError("Message contains invalid characters");
+      setTimeout(() => setError(null), 2200);
+      return;
+    }
+
     const message = {
       id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
       username: currentLeetCodeUsername,
-      text: newMessage.trim(),
+      text: sanitizedText,
       timestamp: Date.now()
     };
 
@@ -2017,14 +2185,6 @@ export default function App() {
     // Handle connection state changes
     pc.onconnectionstatechange = () => {
       console.log(`[Voice] Connection state with ${username}:`, pc.connectionState);
-      setDebugInfo(prev => ({
-        ...prev,
-        [username]: {
-          ...(prev[username] || {}),
-          connectionState: pc.connectionState,
-          signalingState: pc.signalingState
-        }
-      }));
 
       if (pc.connectionState === 'failed') {
         // Only clean up on fatal failure, not temporary disconnection
@@ -2033,13 +2193,7 @@ export default function App() {
     };
 
     pc.onsignalingstatechange = () => {
-      setDebugInfo(prev => ({
-        ...prev,
-        [username]: {
-          ...(prev[username] || {}),
-          signalingState: pc.signalingState
-        }
-      }));
+      console.log(`[Voice] Signaling state with ${username}:`, pc.signalingState);
     };
 
     peerConnectionsRef.current.set(username, pc);
@@ -2620,7 +2774,9 @@ export default function App() {
             const estimatedLimit = Math.max(50, Math.min(200, Math.ceil(warDurationMinutes * 2))); // Assume max 2 submissions per minute
 
             console.log(`[War Check] Fetching submissions for ${username} with limit=${estimatedLimit} (war started ${Math.round(warDurationMinutes)} minutes ago)`);
-            const submission = await fetchWithRetry(`${API_BASE_URL}/${username}/submission?limit=${estimatedLimit}`);
+            // Use shorter TTL for submissions (30 seconds) since they change frequently during wars
+            const submission = await fetchWithRetry(`${API_BASE_URL}/${username}/submission?limit=${estimatedLimit}`, { ttl: 30000 });
+
 
             if (submission && Array.isArray(submission) && submission.length > 0) {
               console.log(`[War Check] Fetched ${submission.length} submissions for ${username} (requested ${estimatedLimit})`);
@@ -2886,19 +3042,33 @@ export default function App() {
       }
     };
 
-    // NO AUTOMATIC POLLING - only manual refresh via button to avoid rate limiting
-    // Store check function in ref for manual refresh only
+    // Store check function in ref for manual refresh
     checkSubmissionsRef.current = checkSubmissions;
 
-    // User must click "Refresh" button to check submissions - no automatic intervals
+    // AUTOMATIC POLLING - Now safe with caching system
+    // Check submissions every 2 minutes during active war
+    console.log('[War Check] Starting automatic submission polling (2 minute interval)');
 
-    // Update ref when warState changes (no interval needed)
+    // Initial check after 10 seconds
+    const initialCheckTimeout = setTimeout(() => {
+      console.log('[War Check] Running initial submission check');
+      checkSubmissions();
+    }, 10000);
+
+    // Then check every 2 minutes
+    let checkInterval = setInterval(() => {
+      console.log('[War Check] Running scheduled submission check');
+      checkSubmissions();
+    }, 2 * 60 * 1000); // 2 minutes
+
+    // Update ref when warState changes
     const updateRefOnChange = () => {
       warStateRef.current = warState;
     };
     updateRefOnChange();
 
     return () => {
+      clearTimeout(initialCheckTimeout);
       if (checkInterval) clearInterval(checkInterval);
       if (backoffTimeout) clearTimeout(backoffTimeout);
       checkSubmissionsRef.current = null; // Clear ref on cleanup
@@ -3870,7 +4040,7 @@ export default function App() {
                 <div>
                   <div className="muted">Quick Actions</div>
                   <div style={{ marginTop: 6 }}>
-                    <button className="btn-outline" onClick={() => { fetchAllUsersData(); playBeep(); }}>Sync Now</button>
+                    <button className="btn-outline" onClick={() => { fetchAllUsersData(true); playBeep(); }}>Sync Now</button>
                   </div>
                 </div>
               </div>
@@ -4078,21 +4248,6 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Debug Panel */}
-                  {isInCall && (
-                    <div style={{ marginTop: "16px", padding: "10px", background: "#1f2937", borderRadius: "8px", fontSize: "10px", color: "#9ca3af" }}>
-                      <div style={{ fontWeight: "bold", marginBottom: "4px" }}>Voice Debug Info:</div>
-                      <div>My Username: {currentLeetCodeUsername}</div>
-                      <div>Participants: {callParticipants.join(", ")}</div>
-                      <div style={{ marginTop: "4px" }}>
-                        {Object.entries(debugInfo).map(([user, info]) => (
-                          <div key={user} style={{ marginBottom: "2px" }}>
-                            <span style={{ color: "#d1d5db" }}>{user}:</span> {info.connectionState || "unknown"} / {info.signalingState || "unknown"}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
 
 
                   {callParticipants.length > 0 && (
@@ -4120,38 +4275,42 @@ export default function App() {
 
               {/* Messages List */}
               <div className="chat-messages" style={{
-                maxHeight: "300px",
+                maxHeight: "350px",
                 overflowY: "auto",
-                marginBottom: 12,
-                padding: "10px 8px",
-                borderRadius: "8px",
-                minHeight: "150px"
+                marginBottom: 16,
+                padding: "16px 12px",
+                borderRadius: "12px",
+                minHeight: "200px",
+                display: "flex",
+                flexDirection: "column",
+                gap: "12px"
               }}>
                 {messages.length === 0 ? (
                   <div style={{
                     textAlign: "center",
-                    padding: "30px 20px",
+                    padding: "40px 20px",
                     color: "var(--muted)",
-                    fontSize: "12px",
+                    fontSize: "13px",
                     display: "flex",
                     flexDirection: "column",
                     alignItems: "center",
-                    gap: "8px"
+                    gap: "12px",
+                    margin: "auto 0"
                   }}>
                     <div style={{
-                      width: "40px",
-                      height: "40px",
+                      width: "56px",
+                      height: "56px",
                       borderRadius: "50%",
-                      background: "linear-gradient(135deg, rgba(6,182,212,0.1), rgba(124,58,237,0.1))",
+                      background: "linear-gradient(135deg, rgba(6,182,212,0.15), rgba(124,58,237,0.15))",
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "center",
-                      marginBottom: "4px"
+                      marginBottom: "8px"
                     }}>
-                      <MessageCircle style={{ width: 20, height: 20, opacity: 0.5 }} />
+                      <MessageCircle style={{ width: 28, height: 28, opacity: 0.4, color: "#06b6d4" }} />
                     </div>
-                    <div style={{ fontWeight: 600, color: "var(--text)", fontSize: "13px" }}>No messages yet</div>
-                    <div style={{ fontSize: "11px" }}>Start the conversation!</div>
+                    <div style={{ fontWeight: 600, color: "var(--text)", fontSize: "14px", letterSpacing: "-0.01em" }}>No messages yet</div>
+                    <div style={{ fontSize: "12px", opacity: 0.7 }}>Start the conversation with your teammates!</div>
                   </div>
                 ) : (
                   messages.map((msg, index) => {
@@ -4159,78 +4318,115 @@ export default function App() {
                     const messageDate = new Date(msg.timestamp);
                     const timeStr = messageDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
                     const showAvatar = !isCurrentUser && (index === 0 || messages[index - 1].username !== msg.username);
+                    const showUsername = !isCurrentUser && showAvatar;
+                    const nextMessageSameUser = index < messages.length - 1 && messages[index + 1].username === msg.username;
 
                     return (
                       <div
                         key={msg.id}
-                        className={`chat-message ${isCurrentUser ? "chat-message-own" : ""}`}
                         style={{
-                          marginBottom: "8px",
-                          padding: "6px 10px",
-                          borderRadius: isCurrentUser ? "12px 12px 2px 12px" : "12px 12px 12px 2px",
-                          maxWidth: "70%",
-                          marginLeft: isCurrentUser ? "auto" : "0",
-                          marginRight: isCurrentUser ? "0" : "auto",
                           display: "flex",
-                          flexDirection: isCurrentUser ? "column" : "row",
-                          gap: "6px",
-                          alignItems: isCurrentUser ? "flex-end" : "flex-start"
+                          flexDirection: "column",
+                          alignItems: isCurrentUser ? "flex-end" : "flex-start",
+                          gap: "4px",
+                          width: "100%"
                         }}
                       >
-                        {!isCurrentUser && showAvatar && (
+                        {/* Username label for others' messages */}
+                        {showUsername && (
                           <div style={{
-                            width: "24px",
-                            height: "24px",
-                            borderRadius: "50%",
-                            background: "linear-gradient(135deg, #06b6d4, #7c3aed)",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            color: "white",
-                            fontWeight: 700,
-                            fontSize: "10px",
-                            flexShrink: 0,
-                            boxShadow: "0 1px 4px rgba(6,182,212,0.2)"
+                            fontSize: "11px",
+                            fontWeight: 600,
+                            color: "var(--muted)",
+                            marginLeft: "40px",
+                            marginBottom: "2px",
+                            letterSpacing: "0.01em"
                           }}>
-                            {msg.username.charAt(0).toUpperCase()}
+                            {msg.username}
                           </div>
                         )}
-                        {!isCurrentUser && !showAvatar && (
-                          <div style={{ width: "24px", flexShrink: 0 }} />
-                        )}
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          {!isCurrentUser && showAvatar && (
-                            <div style={{
-                              fontSize: "11px",
-                              fontWeight: 600,
-                              color: "var(--text)",
-                              marginBottom: "3px"
-                            }}>
-                              {msg.username}
-                            </div>
+
+                        {/* Message bubble container */}
+                        <div style={{
+                          display: "flex",
+                          flexDirection: isCurrentUser ? "row-reverse" : "row",
+                          gap: "8px",
+                          alignItems: "flex-end",
+                          maxWidth: "75%",
+                          alignSelf: isCurrentUser ? "flex-end" : "flex-start"
+                        }}>
+                          {/* Avatar */}
+                          {!isCurrentUser && (
+                            showAvatar ? (
+                              <div style={{
+                                width: "32px",
+                                height: "32px",
+                                borderRadius: "50%",
+                                background: "linear-gradient(135deg, #06b6d4, #7c3aed)",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                color: "white",
+                                fontWeight: 700,
+                                fontSize: "12px",
+                                flexShrink: 0,
+                                boxShadow: "0 2px 8px rgba(6,182,212,0.25)",
+                                border: "2px solid var(--bg)"
+                              }}>
+                                {msg.username.charAt(0).toUpperCase()}
+                              </div>
+                            ) : (
+                              <div style={{ width: "32px", flexShrink: 0 }} />
+                            )
                           )}
-                          <div style={{
-                            fontSize: "13px",
-                            color: isCurrentUser ? "white" : "var(--text)",
-                            wordBreak: "break-word",
-                            lineHeight: "1.4",
-                            fontWeight: isCurrentUser ? 500 : 400
-                          }}>
-                            {msg.text}
-                          </div>
-                          <div style={{
-                            fontSize: "9px",
-                            color: isCurrentUser ? "rgba(255,255,255,0.6)" : "var(--muted)",
-                            marginTop: "3px",
-                            textAlign: isCurrentUser ? "right" : "left",
-                            display: "flex",
-                            alignItems: "center",
-                            gap: "3px"
-                          }}>
-                            {timeStr}
-                            {isCurrentUser && (
-                              <CheckCircle style={{ width: 10, height: 10, opacity: 0.6 }} />
-                            )}
+
+                          {/* Message bubble */}
+                          <div
+                            className={`chat-message ${isCurrentUser ? "chat-message-own" : ""}`}
+                            style={{
+                              padding: "10px 14px",
+                              borderRadius: isCurrentUser
+                                ? "16px 16px 4px 16px"
+                                : "16px 16px 16px 4px",
+                              maxWidth: "100%",
+                              wordBreak: "break-word",
+                              position: "relative",
+                              boxShadow: isCurrentUser
+                                ? "0 2px 8px rgba(6,182,212,0.2)"
+                                : "0 1px 4px rgba(0,0,0,0.08)"
+                            }}
+                          >
+                            {/* Message text */}
+                            <div style={{
+                              fontSize: "14px",
+                              color: isCurrentUser ? "white" : "var(--text)",
+                              lineHeight: "1.5",
+                              fontWeight: isCurrentUser ? 500 : 400,
+                              marginBottom: "4px"
+                            }}>
+                              {msg.text}
+                            </div>
+
+                            {/* Timestamp */}
+                            <div style={{
+                              fontSize: "10px",
+                              color: isCurrentUser ? "rgba(255,255,255,0.7)" : "var(--muted)",
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "4px",
+                              justifyContent: isCurrentUser ? "flex-end" : "flex-start",
+                              marginTop: "2px"
+                            }}>
+                              {timeStr}
+                              {isCurrentUser && (
+                                <CheckCircle style={{
+                                  width: 12,
+                                  height: 12,
+                                  opacity: 0.7,
+                                  strokeWidth: 2.5
+                                }} />
+                              )}
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -4247,6 +4443,15 @@ export default function App() {
                   e.preventDefault();
                   sendMessage();
                 }}
+                style={{
+                  display: "flex",
+                  gap: "10px",
+                  padding: "8px",
+                  background: "linear-gradient(135deg, rgba(236,254,255,0.4), rgba(255,255,255,0.7))",
+                  borderRadius: "12px",
+                  border: "1.5px solid rgba(6, 182, 212, 0.2)",
+                  boxShadow: "0 2px 8px rgba(0,0,0,0.04)"
+                }}
               >
                 <input
                   type="text"
@@ -4254,13 +4459,43 @@ export default function App() {
                   placeholder="💬 Type a message..."
                   value={newMessage}
                   onChange={(e) => setNewMessage(e.target.value)}
+                  style={{
+                    flex: 1,
+                    padding: "10px 14px",
+                    borderRadius: "10px",
+                    border: "none",
+                    background: "rgba(255,255,255,0.95)",
+                    color: "var(--text)",
+                    fontSize: "14px",
+                    outline: "none",
+                    transition: "all 0.2s ease"
+                  }}
                 />
                 <button
                   type="submit"
                   className="chat-send-btn"
                   disabled={!newMessage.trim()}
+                  style={{
+                    width: "42px",
+                    height: "42px",
+                    borderRadius: "10px",
+                    border: "none",
+                    background: newMessage.trim()
+                      ? "linear-gradient(135deg, #06b6d4, #7c3aed)"
+                      : "var(--border)",
+                    color: "white",
+                    cursor: newMessage.trim() ? "pointer" : "not-allowed",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    transition: "all 0.2s ease",
+                    boxShadow: newMessage.trim()
+                      ? "0 2px 8px rgba(6,182,212,0.3)"
+                      : "none",
+                    opacity: newMessage.trim() ? 1 : 0.5
+                  }}
                 >
-                  <Send className="icon" style={{ width: 18, height: 18, position: "relative", zIndex: 1 }} />
+                  <Send style={{ width: 18, height: 18 }} />
                 </button>
               </form>
             </div>
