@@ -50,14 +50,14 @@ import { getFirestore, doc, setDoc, onSnapshot, getDoc, deleteField, collection,
 const firebaseConfig = typeof __firebase_config !== "undefined"
   ? JSON.parse(__firebase_config)
   : {
-      apiKey: "AIzaSyBxavKvL3A5jhjoY6hCQpHaxd1ZP26lUII",
-      authDomain: "leetcode-battle.firebaseapp.com",
-      projectId: "leetcode-battle",
-      storageBucket: "leetcode-battle.firebasestorage.app",
-      messagingSenderId: "523071405286",
-      appId: "1:523071405286:web:7e45767fb5e3fb031fcf27",
-      measurementId: "G-B47VPQVG2J"
-    };
+    apiKey: "AIzaSyBxavKvL3A5jhjoY6hCQpHaxd1ZP26lUII",
+    authDomain: "leetcode-battle.firebaseapp.com",
+    projectId: "leetcode-battle",
+    storageBucket: "leetcode-battle.firebasestorage.app",
+    messagingSenderId: "523071405286",
+    appId: "1:523071405286:web:7e45767fb5e3fb031fcf27",
+    measurementId: "G-B47VPQVG2J"
+  };
 
 const initialAuthToken = typeof __initial_auth_token !== "undefined" ? __initial_auth_token : null;
 const appId = typeof __app_id !== "undefined" ? __app_id : "default-app-id";
@@ -103,7 +103,7 @@ export default function App() {
   const [timeFilter, setTimeFilter] = useState("daily");
   const [soundOn, setSoundOn] = useState(() => localStorage.getItem("soundOn") === "1");
   const [theme, setTheme] = useState(() => localStorage.getItem("theme") || "light");
-  
+
   // Room state - restore from localStorage if user has joined before
   const [rooms, setRooms] = useState([]);
   const [currentRoomId, setCurrentRoomId] = useState(() => {
@@ -124,7 +124,7 @@ export default function App() {
   const [editingRoomName, setEditingRoomName] = useState("");
   const [linkCopied, setLinkCopied] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
-  
+
   // Initial setup state - only show if user hasn't joined before
   const [showInitialSetup, setShowInitialSetup] = useState(() => {
     // Check if user has username and room saved
@@ -132,24 +132,33 @@ export default function App() {
     const hasRoom = localStorage.getItem("lb_currentRoom");
     // Show setup if no username, or if no room (unless URL has room param)
     const urlRoomId = new URLSearchParams(window.location.search).get("room");
+
+    // If we have a room link but no username, we'll use the Join Modal instead
+    if (urlRoomId && !hasUsername) return false;
+
     return !hasUsername || (!hasRoom && !urlRoomId);
   });
   const [initialLeetCodeUsername, setInitialLeetCodeUsername] = useState(() => {
     return localStorage.getItem("lb_leetcodeUsername") || "";
   });
   const [initialRoomName, setInitialRoomName] = useState("");
-  const [showJoinModal, setShowJoinModal] = useState(false);
+  const [showJoinModal, setShowJoinModal] = useState(() => {
+    const urlRoomId = new URLSearchParams(window.location.search).get("room");
+    const hasUsername = localStorage.getItem("lb_leetcodeUsername");
+    // Show join modal if we have a room link but no username
+    return !!(urlRoomId && !hasUsername);
+  });
   const [joinLeetCodeUsername, setJoinLeetCodeUsername] = useState("");
   const [currentLeetCodeUsername, setCurrentLeetCodeUsername] = useState(() => {
     return localStorage.getItem("lb_leetcodeUsername") || "";
   });
-  
+
   // Warning modal for duplicate room names
   const [showDuplicateRoomWarning, setShowDuplicateRoomWarning] = useState(false);
   const [duplicateRoomInfo, setDuplicateRoomInfo] = useState(null); // { id, name, usernames }
   const [pendingRoomName, setPendingRoomName] = useState("");
   const [pendingUsername, setPendingUsername] = useState("");
-  
+
   // War state
   const [warState, setWarState] = useState(null); // { active: bool, problemLink: string, problemSlug: string, startTime: number, duration: number, winner: string, submissions: {} }
   const [warTimer, setWarTimer] = useState(0); // seconds remaining
@@ -179,15 +188,15 @@ export default function App() {
   // Shared room path - all users access the same room data
   const SHARED_ROOM_PATH = currentRoomId
     ? (typeof __app_id !== "undefined"
-        ? `/artifacts/${appId}/rooms/${currentRoomId}`
-        : `rooms/${currentRoomId}`)
+      ? `/artifacts/${appId}/rooms/${currentRoomId}`
+      : `rooms/${currentRoomId}`)
     : null;
-  
+
   // User's local rooms list (for UI)
   const USER_ROOMS_PATH = currentUserId
     ? (typeof __app_id !== "undefined"
-        ? `/artifacts/${appId}/users/${currentUserId}/rooms/list`
-        : `users/${currentUserId}/rooms/list`)
+      ? `/artifacts/${appId}/users/${currentUserId}/rooms/list`
+      : `users/${currentUserId}/rooms/list`)
     : null;
 
   /* ---------------------------
@@ -237,22 +246,22 @@ export default function App() {
   /* ---------------------------
      Load and save rooms
      --------------------------- */
-  
+
   // Restore session on mount if user has joined before (only run once)
   const hasRestoredRef = useRef(false);
   useEffect(() => {
     // Wait for Firebase to be initialized and only run once
     if (!db || hasRestoredRef.current) return;
-    
+
     const savedUsername = localStorage.getItem("lb_leetcodeUsername");
     const savedRoomId = localStorage.getItem("lb_currentRoom");
     const savedRooms = localStorage.getItem("lb_rooms");
-    
+
     // Only restore if user has username (meaning they've joined before)
     if (savedUsername && savedRoomId) {
       // Restore username
       setCurrentLeetCodeUsername(savedUsername);
-      
+
       // Restore rooms if available (Firebase will sync and update these later)
       if (savedRooms) {
         try {
@@ -264,28 +273,28 @@ export default function App() {
           console.error("Error parsing saved rooms:", e);
         }
       }
-      
+
       // Restore current room (already set in useState initializer, but ensure it's set)
       if (savedRoomId && !currentRoomId) {
         setCurrentRoomId(savedRoomId);
       }
-      
+
       // Hide initial setup since user has joined before
       setShowInitialSetup(false);
     }
-    
+
     hasRestoredRef.current = true;
   }, [db]); // Only run when Firebase is ready, use ref to prevent re-running
-  
+
   useEffect(() => {
     if (rooms.length > 0) {
-    localStorage.setItem("lb_rooms", JSON.stringify(rooms));
+      localStorage.setItem("lb_rooms", JSON.stringify(rooms));
     }
   }, [rooms]);
 
   useEffect(() => {
     if (currentRoomId) {
-    localStorage.setItem("lb_currentRoom", currentRoomId);
+      localStorage.setItem("lb_currentRoom", currentRoomId);
     }
   }, [currentRoomId]);
 
@@ -293,8 +302,8 @@ export default function App() {
   const saveUserRooms = useCallback(async (roomsData) => {
     if (!db || !currentUserId || !USER_ROOMS_PATH) {
       setRooms(roomsData);
-        return;
-      }
+      return;
+    }
     try {
       await setDoc(doc(db, USER_ROOMS_PATH), { rooms: roomsData });
       setRooms(roomsData);
@@ -321,9 +330,9 @@ export default function App() {
           await setDoc(docRef, { ...currentData, war: deleteField() }, { merge: true });
         }
       } else {
-      // Ensure we have the room ID in the data
-      const dataToSave = { ...roomData, id: currentRoomId };
-      await setDoc(doc(db, SHARED_ROOM_PATH), dataToSave, { merge: true });
+        // Ensure we have the room ID in the data
+        const dataToSave = { ...roomData, id: currentRoomId };
+        await setDoc(doc(db, SHARED_ROOM_PATH), dataToSave, { merge: true });
       }
     } catch (e) {
       console.error("saveSharedRoom error:", e);
@@ -357,7 +366,7 @@ export default function App() {
   // Check if room exists by name in Firebase (checks actual name, not just normalized ID)
   const checkRoomExistsByName = useCallback(async (roomName) => {
     if (!db) return null;
-    
+
     // First check by normalized ID (for backwards compatibility)
     const normalizedId = normalizeRoomName(roomName);
     const roomById = await fetchSharedRoom(normalizedId);
@@ -367,7 +376,7 @@ export default function App() {
         return roomById;
       }
     }
-    
+
     // Also check all rooms by actual name (case-insensitive)
     try {
       const roomsCollectionPath = typeof __app_id !== "undefined"
@@ -375,7 +384,7 @@ export default function App() {
         : `rooms`;
       const roomsRef = collection(db, roomsCollectionPath);
       const roomsSnapshot = await getDocs(roomsRef);
-      
+
       for (const roomDoc of roomsSnapshot.docs) {
         const roomData = roomDoc.data();
         if (roomData.name && roomData.name.toLowerCase() === roomName.toLowerCase()) {
@@ -385,7 +394,7 @@ export default function App() {
     } catch (e) {
       console.error("Error checking rooms by name:", e);
     }
-    
+
     return null;
   }, [db, normalizeRoomName, fetchSharedRoom]);
 
@@ -395,7 +404,7 @@ export default function App() {
     const docRef = doc(db, USER_ROOMS_PATH);
     const unsub = onSnapshot(docRef, (snap) => {
       if (snap.exists()) {
-      const data = snap.data();
+        const data = snap.data();
         if (data?.rooms && Array.isArray(data.rooms) && data.rooms.length > 0) {
           // Only update if rooms actually changed to prevent unnecessary re-renders
           setRooms(prevRooms => {
@@ -409,9 +418,9 @@ export default function App() {
           // Ensure current room exists (use functional update to avoid dependency)
           setCurrentRoomId(prevRoomId => {
             const currentExists = data.rooms.find(r => r.id === prevRoomId);
-          if (!currentExists && data.rooms.length > 0) {
+            if (!currentExists && data.rooms.length > 0) {
               return data.rooms[0].id;
-          }
+            }
             return prevRoomId;
           });
         }
@@ -427,15 +436,15 @@ export default function App() {
   const isUpdatingRef = useRef(false);
   const lastUpdateRef = useRef({ usernames: null, timestamp: 0 });
   const lastRoomDataRef = useRef(null); // Track last room data to detect actual changes
-  
+
   useEffect(() => {
     if (!db || !SHARED_ROOM_PATH || !currentRoomId) return;
     // Don't load room data if user hasn't joined yet (no username)
     if (!currentLeetCodeUsername) {
-        setFriendUsernames([]);
-        return;
-      }
-    
+      setFriendUsernames([]);
+      return;
+    }
+
     const docRef = doc(db, SHARED_ROOM_PATH);
     const unsub = onSnapshot(docRef, async (snap) => {
       // Prevent infinite loops - don't process if we're currently updating
@@ -443,21 +452,21 @@ export default function App() {
         console.log("[Room Sync] Skipping snapshot - update in progress");
         return;
       }
-      
+
       // Check if this is just a message update (only messages field changed)
       const currentData = snap.exists() ? snap.data() : null;
       const lastData = lastRoomDataRef.current;
-      
+
       // If only messages changed, skip processing (messages are handled by separate listener)
       if (lastData && currentData) {
         const lastDataWithoutMessages = { ...lastData };
         delete lastDataWithoutMessages.messages;
         const currentDataWithoutMessages = { ...currentData };
         delete currentDataWithoutMessages.messages;
-        
+
         const lastDataStr = JSON.stringify(lastDataWithoutMessages);
         const currentDataStr = JSON.stringify(currentDataWithoutMessages);
-        
+
         // If only messages changed, let the messages listener handle it
         if (lastDataStr === currentDataStr && lastData.messages !== currentData.messages) {
           console.log("[Room Sync] Only messages changed, skipping room data update");
@@ -466,20 +475,20 @@ export default function App() {
           return;
         }
       }
-      
+
       // Update ref for next comparison
       lastRoomDataRef.current = currentData;
-      
+
       if (snap.exists()) {
-      const data = snap.data();
+        const data = snap.data();
         const currentUsername = currentLeetCodeUsername;
         let usernames = [...(data?.usernames || [])];
-        
+
         // Check if usernames actually changed to avoid unnecessary updates
         const usernamesStr = JSON.stringify(usernames.sort());
         const lastUsernamesStr = JSON.stringify((lastUpdateRef.current.usernames || []).sort());
         const timeSinceLastUpdate = Date.now() - lastUpdateRef.current.timestamp;
-        
+
         // Ensure current user is always in the room (persist on refresh)
         // BUT: Don't auto-add to default room - user must explicitly join
         // Only update if username is missing AND we haven't updated recently (prevent loops)
@@ -487,7 +496,7 @@ export default function App() {
           usernames.push(currentUsername);
           // Mark that we're updating to prevent snapshot from triggering again
           isUpdatingRef.current = true;
-          
+
           try {
             await setDoc(docRef, {
               ...data,
@@ -495,10 +504,10 @@ export default function App() {
               name: data.name || (currentRoomId === "default" ? "Default Room" : `Room ${currentRoomId.substring(0, 8)}`),
               usernames: usernames
             }, { merge: true });
-            
+
             // Update ref to track what we just wrote
             lastUpdateRef.current = { usernames, timestamp: Date.now() };
-            
+
             // Reset flag after a short delay to allow snapshot to process
             setTimeout(() => {
               isUpdatingRef.current = false;
@@ -513,7 +522,7 @@ export default function App() {
             lastUpdateRef.current = { usernames, timestamp: Date.now() };
           }
         }
-        
+
         // Only update friends list if it actually changed
         setFriendUsernames(prevUsernames => {
           const prevStr = JSON.stringify([...prevUsernames].sort());
@@ -523,23 +532,23 @@ export default function App() {
           }
           return prevUsernames; // Return previous to prevent re-render
         });
-        
+
         // Update voice call state (room-specific) - sync for all users
         if (data?.voiceCall && data.voiceCall.active) {
           const voiceCall = data.voiceCall;
           const participants = voiceCall.participants || [];
           const isUserInCall = participants.includes(currentLeetCodeUsername);
-          
+
           // Always update call status and participants for all users
           setIsCallActive(true);
           setCallParticipants(participants);
-          
+
           // If user is in the call but local state says they're not, sync it
           if (isUserInCall && !isInCall) {
             setIsInCall(true);
             console.log(`[Voice] User ${currentLeetCodeUsername} is in call, syncing state`);
           }
-          
+
           // If user is not in call but local state says they are, sync it
           if (!isUserInCall && isInCall) {
             // User was removed from call - end their local call
@@ -600,7 +609,7 @@ export default function App() {
             setIsMuted(false);
           }
         }
-        
+
         // Update war state (room-specific) - only if war data changed
         if (data?.war) {
           setWarState(prevWar => {
@@ -614,13 +623,13 @@ export default function App() {
               }
               return prevWar; // No change, return previous
             }
-            
+
             // If we have a local war state and it's the same war, merge submissions
             if (prevWar && prevWar.problemSlug === data.war.problemSlug && prevWar.startTime === data.war.startTime) {
               // Check if submissions actually changed
               const prevSubmissionsStr = JSON.stringify(prevWar.submissions || {});
               const newSubmissionsStr = JSON.stringify(data.war.submissions || {});
-              
+
               // Merge: prefer local submissions if they're newer, otherwise use Firebase
               const mergedSubmissions = { ...data.war.submissions };
               if (prevWar.submissions) {
@@ -633,30 +642,30 @@ export default function App() {
                   }
                 });
               }
-              
+
               const mergedSubmissionsStr = JSON.stringify(mergedSubmissions);
               const prevCountsStr = JSON.stringify(prevWar.submissionCounts || {});
               const newCountsStr = JSON.stringify(data.war.submissionCounts || {});
-              
+
               // Only update if something actually changed
-              if (prevSubmissionsStr !== mergedSubmissionsStr || prevCountsStr !== newCountsStr || 
-                  prevWar.active !== data.war.active || prevWar.winner !== data.war.winner) {
-              return {
-                ...data.war,
-                submissions: mergedSubmissions,
-                submissionCounts: data.war.submissionCounts || prevWar.submissionCounts || {}
-              };
-            }
+              if (prevSubmissionsStr !== mergedSubmissionsStr || prevCountsStr !== newCountsStr ||
+                prevWar.active !== data.war.active || prevWar.winner !== data.war.winner) {
+                return {
+                  ...data.war,
+                  submissions: mergedSubmissions,
+                  submissionCounts: data.war.submissionCounts || prevWar.submissionCounts || {}
+                };
+              }
               return prevWar; // No change, return previous
             }
-            
+
             // New war or different war - check if it's actually different
             if (!prevWar || prevWar.problemSlug !== data.war.problemSlug || prevWar.startTime !== data.war.startTime) {
-            return data.war;
+              return data.war;
             }
             return prevWar; // Same war, return previous
           });
-          
+
           // Update submissions only if changed
           setWarSubmissions(prevSubmissions => {
             const prevStr = JSON.stringify(prevSubmissions);
@@ -675,7 +684,7 @@ export default function App() {
             }
             return prevWar; // Already null, no change
           });
-          
+
           setWarSubmissions(prevSubmissions => {
             if (Object.keys(prevSubmissions).length > 0) {
               return {};
@@ -683,7 +692,7 @@ export default function App() {
             return prevSubmissions; // Already empty, no change
           });
         }
-        
+
         // Update local rooms state with shared room data - only if changed
         setRooms(prev => {
           const roomIndex = prev.findIndex(r => r.id === currentRoomId);
@@ -691,19 +700,19 @@ export default function App() {
             const existingRoom = prev[roomIndex];
             // Prioritize Firebase name, then existing local name, then fallback
             const roomName = data.name || existingRoom.name || (currentRoomId === "default" ? "Default Room" : `Room ${currentRoomId.substring(0, 8)}`);
-            
+
             // Check if anything actually changed
             const nameChanged = existingRoom.name !== roomName;
             const usernamesChanged = JSON.stringify([...existingRoom.usernames || []].sort()) !== JSON.stringify([...usernames].sort());
-            
+
             if (nameChanged || usernamesChanged) {
-            const updated = [...prev];
-            updated[roomIndex] = {
-              ...updated[roomIndex],
+              const updated = [...prev];
+              updated[roomIndex] = {
+                ...updated[roomIndex],
                 name: roomName,
-              usernames: usernames
-            };
-            return updated;
+                usernames: usernames
+              };
+              return updated;
             }
             return prev; // No change, return previous
           } else {
@@ -746,8 +755,8 @@ export default function App() {
 
   const saveFriendsList = useCallback(async (usernames) => {
     // Update local state immediately
-      setFriendUsernames(usernames);
-    setRooms(prev => prev.map(r => 
+    setFriendUsernames(usernames);
+    setRooms(prev => prev.map(r =>
       r.id === currentRoomId ? { ...r, usernames } : r
     ));
 
@@ -757,7 +766,7 @@ export default function App() {
     }
     try {
       const currentRoom = rooms.find(r => r.id === currentRoomId);
-      await saveSharedRoom({ 
+      await saveSharedRoom({
         usernames,
         name: currentRoom?.name || "Default Room"
       });
@@ -777,7 +786,7 @@ export default function App() {
         // Add cache-busting parameter to ensure fresh data
         const separator = url.includes('?') ? '&' : '?';
         const cacheBustUrl = `${url}${separator}_t=${Date.now()}`;
-        
+
         // Add no-cache headers to prevent browser/CDN caching
         const res = await fetch(cacheBustUrl, {
           method: 'GET',
@@ -788,7 +797,7 @@ export default function App() {
           },
           cache: 'no-store' // Force fetch to bypass cache
         });
-        
+
         if (res.status === 429) {
           // Rate limited - throw immediately without retry
           const errorText = await res.text().catch(() => "");
@@ -797,7 +806,7 @@ export default function App() {
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        
+
         // Log API response for debugging
         if (url.includes('/submission')) {
           console.log(`[API] Fetched ${Array.isArray(data) ? data.length : 'unknown'} submissions from ${url}`);
@@ -810,7 +819,7 @@ export default function App() {
             });
           }
         }
-        
+
         return data;
       } catch (e) {
         tries++;
@@ -987,12 +996,12 @@ export default function App() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const roomId = params.get("room");
-    
+
     // Only process if we have a room ID, database is ready, and we're not already in a room
     if (roomId && db && !currentRoomId && !showJoinModal) {
       // Check if user already has a username
       const hasUsername = currentLeetCodeUsername || localStorage.getItem("lb_leetcodeUsername");
-      
+
       if (!hasUsername) {
         // No username - show join modal to get username first
         setFriendUsernames([]);
@@ -1002,20 +1011,20 @@ export default function App() {
         setShowJoinModal(true);
         return;
       }
-      
+
       // User has username - try to join room automatically
       // Set currentRoomId first so snapshot listener can initialize
       setCurrentRoomId(roomId);
-      
+
       // Always fetch from Firebase to ensure we have the latest room data
       // This ensures default room and other rooms are properly synced
       fetchSharedRoom(roomId).then(async (sharedRoom) => {
         const currentUsername = currentLeetCodeUsername;
-        
+
         if (sharedRoom) {
           // Room exists in Firebase - ensure current user is in the room
           let updatedUsernames = [...(sharedRoom.usernames || [])];
-          
+
           // Add current user to room if they have a username and aren't already in the room
           // BUT: Don't auto-add to default room - user must explicitly join
           if (currentUsername && !updatedUsernames.includes(currentUsername) && roomId !== "default") {
@@ -1030,7 +1039,7 @@ export default function App() {
               usernames: updatedUsernames
             }, { merge: true });
           }
-          
+
           // Update local state - snapshot listener will handle real-time updates
           setRooms(prev => {
             const exists = prev.some(r => r.id === roomId);
@@ -1046,20 +1055,20 @@ export default function App() {
             } else {
               // Update existing room with latest data from Firebase
               // Prioritize Firebase name, then existing local name, then fallback
-              const updated = prev.map(r => 
-                r.id === roomId 
+              const updated = prev.map(r =>
+                r.id === roomId
                   ? {
-                      ...r,
-                      name: sharedRoom.name || r.name || (roomId === "default" ? "Default Room" : `Room ${roomId.substring(0, 8)}`),
-                      usernames: updatedUsernames
-                    }
+                    ...r,
+                    name: sharedRoom.name || r.name || (roomId === "default" ? "Default Room" : `Room ${roomId.substring(0, 8)}`),
+                    usernames: updatedUsernames
+                  }
                   : r
               );
               saveUserRooms(updated);
               return updated;
             }
           });
-          
+
           // Snapshot listener will update friendUsernames in real-time
           setAppStatus("Joined room!");
           // Clean URL after joining
@@ -1074,13 +1083,13 @@ export default function App() {
             name: roomId === "default" ? "Default Room" : `Room ${roomId.substring(0, 8)}`,
             usernames: (currentUsername && roomId !== "default") ? [currentUsername] : []
           };
-          
+
           // Save to Firebase
           const roomPath = typeof __app_id !== "undefined"
             ? `/artifacts/${appId}/rooms/${roomId}`
             : `rooms/${roomId}`;
           await setDoc(doc(db, roomPath), newRoom, { merge: true });
-          
+
           // Update local state
           setRooms(prev => {
             const exists = prev.some(r => r.id === roomId);
@@ -1090,14 +1099,14 @@ export default function App() {
               return newRooms;
             } else {
               // Update existing room
-              const updated = prev.map(r => 
+              const updated = prev.map(r =>
                 r.id === roomId ? { ...r, ...newRoom } : r
               );
               saveUserRooms(updated);
               return updated;
             }
           });
-          
+
           // Snapshot listener will update friendUsernames
           setAppStatus("Created new room");
           // Clean URL after joining
@@ -1141,104 +1150,104 @@ export default function App() {
       if (!db) {
         throw new Error("Database not ready. Please wait...");
       }
-      
+
       const name = (roomName || newRoomName).trim();
       if (!name) {
         setError("Room name is required");
         setTimeout(() => setError(null), 2200);
         return;
       }
-      
+
       // Use provided username or current LeetCode username
       const username = leetcodeUsername || currentLeetCodeUsername;
-      
+
       // Normalize room name to create unique ID
       const normalizedId = normalizeRoomName(name);
-      
+
       // First check local rooms list for duplicate name (case-insensitive)
-    const localDuplicate = rooms.find(r => 
-      r.id === normalizedId || r.name.toLowerCase() === name.toLowerCase()
-    );
-    if (localDuplicate) {
-      // Switch to existing room instead of creating duplicate
-      setCurrentRoomId(localDuplicate.id);
-      // Add username if provided and not already in room
-      if (username && localDuplicate.usernames && !localDuplicate.usernames.includes(username)) {
-        const updatedUsernames = [...localDuplicate.usernames, username];
-        // Update Firebase
-        const roomPath = typeof __app_id !== "undefined"
-          ? `/artifacts/${appId}/rooms/${normalizedId}`
-          : `rooms/${normalizedId}`;
-        await setDoc(doc(db, roomPath), {
-          id: normalizedId,
-          name: localDuplicate.name,
-          usernames: updatedUsernames
-        }, { merge: true });
-        // Update local state
-        setRooms(prev => prev.map(r => 
-          r.id === normalizedId ? { ...r, usernames: updatedUsernames } : r
-        ));
-        setFriendUsernames(updatedUsernames);
-      } else if (username && !localDuplicate.usernames) {
-        // Room exists but has no usernames yet
-        const updatedUsernames = [username];
-        const roomPath = typeof __app_id !== "undefined"
-          ? `/artifacts/${appId}/rooms/${normalizedId}`
-          : `rooms/${normalizedId}`;
-        await setDoc(doc(db, roomPath), {
-          id: normalizedId,
-          name: localDuplicate.name,
-          usernames: updatedUsernames
-        }, { merge: true });
-        setRooms(prev => prev.map(r => 
-          r.id === normalizedId ? { ...r, usernames: updatedUsernames } : r
-        ));
-        setFriendUsernames(updatedUsernames);
+      const localDuplicate = rooms.find(r =>
+        r.id === normalizedId || r.name.toLowerCase() === name.toLowerCase()
+      );
+      if (localDuplicate) {
+        // Switch to existing room instead of creating duplicate
+        setCurrentRoomId(localDuplicate.id);
+        // Add username if provided and not already in room
+        if (username && localDuplicate.usernames && !localDuplicate.usernames.includes(username)) {
+          const updatedUsernames = [...localDuplicate.usernames, username];
+          // Update Firebase
+          const roomPath = typeof __app_id !== "undefined"
+            ? `/artifacts/${appId}/rooms/${normalizedId}`
+            : `rooms/${normalizedId}`;
+          await setDoc(doc(db, roomPath), {
+            id: normalizedId,
+            name: localDuplicate.name,
+            usernames: updatedUsernames
+          }, { merge: true });
+          // Update local state
+          setRooms(prev => prev.map(r =>
+            r.id === normalizedId ? { ...r, usernames: updatedUsernames } : r
+          ));
+          setFriendUsernames(updatedUsernames);
+        } else if (username && !localDuplicate.usernames) {
+          // Room exists but has no usernames yet
+          const updatedUsernames = [username];
+          const roomPath = typeof __app_id !== "undefined"
+            ? `/artifacts/${appId}/rooms/${normalizedId}`
+            : `rooms/${normalizedId}`;
+          await setDoc(doc(db, roomPath), {
+            id: normalizedId,
+            name: localDuplicate.name,
+            usernames: updatedUsernames
+          }, { merge: true });
+          setRooms(prev => prev.map(r =>
+            r.id === normalizedId ? { ...r, usernames: updatedUsernames } : r
+          ));
+          setFriendUsernames(updatedUsernames);
+        }
+        setNewRoomName("");
+        setShowRoomModal(false);
+        playBeep();
+        return;
+      }
+
+      // Check if room already exists in Firebase
+      const existingRoom = await checkRoomExistsByName(name);
+      if (existingRoom) {
+        // Room exists - show warning modal instead of auto-joining
+        setDuplicateRoomInfo(existingRoom);
+        setPendingRoomName(name);
+        setPendingUsername(username);
+        setShowDuplicateRoomWarning(true);
+        setNewRoomName("");
+        setShowRoomModal(false);
+        return { duplicate: true }; // Return indicator that duplicate was found
+      }
+
+      // Create new room
+      const newRoom = {
+        id: normalizedId,
+        name,
+        usernames: username ? [username] : []
+      };
+      // Save to shared room collection directly (with explicit name and usernames)
+      const roomPath = typeof __app_id !== "undefined"
+        ? `/artifacts/${appId}/rooms/${normalizedId}`
+        : `rooms/${normalizedId}`;
+      await setDoc(doc(db, roomPath), {
+        id: normalizedId,
+        name: name, // Always use the provided name
+        usernames: newRoom.usernames
+      }, { merge: true });
+      // Then add to user's local list
+      const updatedRooms = [...rooms, newRoom];
+      await saveUserRooms(updatedRooms);
+      setCurrentRoomId(newRoom.id);
+      if (username) {
+        setFriendUsernames([username]);
       }
       setNewRoomName("");
       setShowRoomModal(false);
       playBeep();
-      return;
-    }
-    
-    // Check if room already exists in Firebase
-    const existingRoom = await checkRoomExistsByName(name);
-    if (existingRoom) {
-      // Room exists - show warning modal instead of auto-joining
-      setDuplicateRoomInfo(existingRoom);
-      setPendingRoomName(name);
-      setPendingUsername(username);
-      setShowDuplicateRoomWarning(true);
-      setNewRoomName("");
-      setShowRoomModal(false);
-      return { duplicate: true }; // Return indicator that duplicate was found
-    }
-    
-    // Create new room
-    const newRoom = {
-      id: normalizedId,
-      name,
-      usernames: username ? [username] : []
-    };
-    // Save to shared room collection directly (with explicit name and usernames)
-    const roomPath = typeof __app_id !== "undefined"
-      ? `/artifacts/${appId}/rooms/${normalizedId}`
-      : `rooms/${normalizedId}`;
-    await setDoc(doc(db, roomPath), {
-      id: normalizedId,
-      name: name, // Always use the provided name
-      usernames: newRoom.usernames 
-    }, { merge: true });
-    // Then add to user's local list
-    const updatedRooms = [...rooms, newRoom];
-    await saveUserRooms(updatedRooms);
-    setCurrentRoomId(newRoom.id);
-    if (username) {
-      setFriendUsernames([username]);
-    }
-    setNewRoomName("");
-    setShowRoomModal(false);
-    playBeep();
     } catch (error) {
       console.error("Error creating room:", error);
       setError(`Failed to create room: ${error.message || "Unknown error"}`);
@@ -1251,10 +1260,10 @@ export default function App() {
   const joinExistingRoom = async () => {
     try {
       if (!duplicateRoomInfo || !db) return;
-      
+
       const normalizedId = normalizeRoomName(pendingRoomName);
       const username = pendingUsername || currentLeetCodeUsername;
-      
+
       // Add room to local list if not already present
       setRooms(prev => {
         const exists = prev.some(r => r.id === duplicateRoomInfo.id || r.id === normalizedId);
@@ -1269,10 +1278,10 @@ export default function App() {
         }
         return prev;
       });
-      
+
       // Switch to the existing room
       setCurrentRoomId(duplicateRoomInfo.id || normalizedId);
-      
+
       // Add username to room if provided
       if (username) {
         const updatedUsernames = [...(duplicateRoomInfo.usernames || [])];
@@ -1292,7 +1301,7 @@ export default function App() {
           setFriendUsernames(updatedUsernames);
         }
       }
-      
+
       // Close warning modal
       setShowDuplicateRoomWarning(false);
       setDuplicateRoomInfo(null);
@@ -1318,18 +1327,18 @@ export default function App() {
   const exitRoom = async (roomId) => {
     try {
       if (!db || !currentLeetCodeUsername) return;
-      
+
       const room = rooms.find(r => r.id === roomId);
       if (!room) return;
-      
+
       // Remove username from room's usernames list
       const updatedUsernames = (room.usernames || []).filter(u => u !== currentLeetCodeUsername);
-      
+
       // Update Firebase
       const roomPath = typeof __app_id !== "undefined"
         ? `/artifacts/${appId}/rooms/${roomId}`
         : `rooms/${roomId}`;
-      
+
       if (updatedUsernames.length === 0) {
         // If no users left, optionally delete the room or just clear usernames
         await setDoc(doc(db, roomPath), {
@@ -1344,11 +1353,11 @@ export default function App() {
           usernames: updatedUsernames
         }, { merge: true });
       }
-      
+
       // Remove room from local list
       const updatedRooms = rooms.filter(r => r.id !== roomId);
       await saveUserRooms(updatedRooms);
-      
+
       // If exiting current room, switch to another room or clear selection
       if (roomId === currentRoomId) {
         if (updatedRooms.length > 0) {
@@ -1359,7 +1368,7 @@ export default function App() {
           setMessages([]); // Clear messages when leaving room
         }
       }
-      
+
       playBeep();
     } catch (error) {
       console.error("Error exiting room:", error);
@@ -1373,7 +1382,7 @@ export default function App() {
     try {
       const username = initialLeetCodeUsername.trim();
       const roomName = initialRoomName.trim();
-      
+
       if (!username) {
         setError("LeetCode username is required");
         setTimeout(() => setError(null), 2200);
@@ -1384,20 +1393,20 @@ export default function App() {
         setTimeout(() => setError(null), 2200);
         return;
       }
-      
+
       if (!db) {
         setError("Database not ready. Please wait...");
         setTimeout(() => setError(null), 2200);
         return;
       }
-      
+
       setLoading(true);
       setAppStatus("Creating room...");
-      
+
       // Save username to localStorage
       localStorage.setItem("lb_leetcodeUsername", username);
       setCurrentLeetCodeUsername(username);
-      
+
       // Create or join room - this may show warning modal if room exists
       try {
         const result = await createRoom(roomName, username);
@@ -1429,40 +1438,40 @@ export default function App() {
   const handleJoinRoom = async () => {
     try {
       const username = joinLeetCodeUsername.trim();
-      
+
       if (!username) {
         setError("LeetCode username is required");
         setTimeout(() => setError(null), 2200);
         return;
       }
-      
+
       if (!db) {
         setError("Database not ready. Please wait...");
         setTimeout(() => setError(null), 2200);
         return;
       }
-      
+
       // Save username to localStorage
       localStorage.setItem("lb_leetcodeUsername", username);
       setCurrentLeetCodeUsername(username);
-      
+
       // Get room from URL
       const params = new URLSearchParams(window.location.search);
       const roomId = params.get("room");
-      
+
       if (!roomId) {
         setError("Invalid room link - no room ID found");
         setTimeout(() => setError(null), 2200);
         setShowJoinModal(false);
         return;
       }
-      
+
       setLoading(true);
       setAppStatus("Joining room...");
-      
+
       // Fetch room first before setting currentRoomId
       const sharedRoom = await fetchSharedRoom(roomId);
-      
+
       if (!sharedRoom) {
         setError("Room not found");
         setTimeout(() => setError(null), 3000);
@@ -1471,35 +1480,35 @@ export default function App() {
         setAppStatus("Room not found");
         return;
       }
-      
+
       // Add username to room if not already present
       const updatedUsernames = [...(sharedRoom.usernames || [])];
       if (!updatedUsernames.includes(username)) {
         updatedUsernames.push(username);
       }
-      
+
       // Save to Firebase with updated usernames directly
       const roomPath = typeof __app_id !== "undefined"
         ? `/artifacts/${appId}/rooms/${roomId}`
         : `rooms/${roomId}`;
-      
+
       await setDoc(doc(db, roomPath), {
         id: roomId,
         name: sharedRoom.name || `Room ${roomId.substring(0, 8)}`,
         usernames: updatedUsernames
       }, { merge: true });
-      
+
       // Update local state - start fresh with just this room (don't keep old rooms from localStorage)
       const newRoom = {
         id: roomId,
         name: sharedRoom.name || `Room ${roomId.substring(0, 8)}`,
         usernames: updatedUsernames
       };
-      
+
       // Set currentRoomId AFTER we've verified the room exists and saved it
       setCurrentRoomId(roomId);
       setRooms([newRoom]);
-      
+
       // Save to user's room list (only if we have currentUserId)
       if (currentUserId) {
         try {
@@ -1509,12 +1518,12 @@ export default function App() {
           // Don't fail the join if this fails - room is already joined
         }
       }
-      
+
       // Snapshot listener will update friendUsernames in real-time
       setShowJoinModal(false);
       setAppStatus("Joined room!");
       setLoading(false);
-      
+
       // Clean URL
       try {
         window.history.replaceState({}, "", window.location.pathname);
@@ -1522,7 +1531,7 @@ export default function App() {
         console.error("Error updating history:", historyError);
         // Don't fail if history update fails
       }
-      
+
       playBeep();
     } catch (e) {
       console.error("Error joining room:", e);
@@ -1577,7 +1586,7 @@ export default function App() {
       setTimeout(() => setError(null), 2200);
       return;
     }
-    const updatedRooms = rooms.map(r => 
+    const updatedRooms = rooms.map(r =>
       r.id === editingRoomId ? { ...r, name } : r
     );
     // Update shared room name in Firebase (also include usernames to keep data in sync)
@@ -1586,7 +1595,7 @@ export default function App() {
       const roomPath = typeof __app_id !== "undefined"
         ? `/artifacts/${appId}/rooms/${editingRoomId}`
         : `rooms/${editingRoomId}`;
-      setDoc(doc(db, roomPath), { 
+      setDoc(doc(db, roomPath), {
         name,
         usernames: roomToUpdate.usernames || []
       }, { merge: true });
@@ -1646,22 +1655,22 @@ export default function App() {
           "valid-parentheses", "container-with-most-water", "3sum", "climbing-stairs"
         ]
       };
-      
+
       const difficulty = warDifficulty || "any";
       const difficultyList = problemLists[difficulty] || problemLists.any;
-      
+
       // Filter out recently used problems
       const recentProblems = usedProblems.slice(-20);
       const availableProblems = difficultyList.filter(slug => !recentProblems.includes(slug));
       const problemsToChooseFrom = availableProblems.length > 0 ? availableProblems : difficultyList;
-      
+
       // Select random problem from the list
       const randomIndex = Math.floor(Math.random() * problemsToChooseFrom.length);
       const selectedSlug = problemsToChooseFrom[randomIndex];
-      
+
       // Track this problem as used
       setUsedProblems(prev => [...prev, selectedSlug].slice(-20));
-      
+
       // Map difficulty for display
       const difficultyMap = {
         easy: "EASY",
@@ -1669,9 +1678,9 @@ export default function App() {
         hard: "HARD",
         any: "MEDIUM"
       };
-      
+
       console.log(`[Problem Selection] Selected random problem: ${selectedSlug} (${difficulty}) from ${problemsToChooseFrom.length} available problems`);
-      
+
       return {
         link: `https://leetcode.com/problems/${selectedSlug}/`,
         slug: selectedSlug,
@@ -1694,23 +1703,23 @@ export default function App() {
   // Start war
   const startWar = async () => {
     try {
-    if (friendUsernames.length === 0) {
-      setError("Add usernames to start a war!");
-      setTimeout(() => setError(null), 2200);
-      return;
-    }
-      
+      if (friendUsernames.length === 0) {
+        setError("Add usernames to start a war!");
+        setTimeout(() => setError(null), 2200);
+        return;
+      }
+
       // Set loading state to prevent UI issues
       setLoading(true);
       setAppStatus("Starting war...");
-      
+
       // Set flag to prevent snapshot listener from interfering
       isUpdatingRef.current = true;
-    
-    const problem = await getRandomProblem();
-    const warDuration = 3600; // 1 hour in seconds
-    const startTime = Date.now();
-      
+
+      const problem = await getRandomProblem();
+      const warDuration = 3600; // 1 hour in seconds
+      const startTime = Date.now();
+
       // Log the problem details for debugging
       console.log(`[War Start] Problem selected:`, {
         slug: problem.slug,
@@ -1718,36 +1727,36 @@ export default function App() {
         link: problem.link,
         difficulty: problem.difficulty
       });
-    
-    const newWarState = {
-      active: true,
-      problemLink: problem.link,
+
+      const newWarState = {
+        active: true,
+        problemLink: problem.link,
         problemSlug: problem.slug, // Store the exact slug from API
         problemTitle: problem.title || "", // Also store title for better matching
-      startTime,
-      duration: warDuration,
-      winner: null,
-      participants: friendUsernames,
-      submissions: {},
-      submissionCounts: {} // Track total submission count per user
-    };
-    
+        startTime,
+        duration: warDuration,
+        winner: null,
+        participants: friendUsernames,
+        submissions: {},
+        submissionCounts: {} // Track total submission count per user
+      };
+
       // Update local state first for immediate UI feedback
-    setWarState(newWarState);
-    setWarTimer(warDuration);
-    setWarSubmissions({});
-      
+      setWarState(newWarState);
+      setWarTimer(warDuration);
+      setWarSubmissions({});
+
       // Save to shared room (room-specific)
       await saveSharedRoom({ war: newWarState });
-      
+
       // Update the ref so snapshot listener knows about this change
       if (lastRoomDataRef.current) {
         lastRoomDataRef.current = { ...lastRoomDataRef.current, war: newWarState };
       }
-      
+
       setAppStatus("War started!");
-    playBeep();
-      
+      playBeep();
+
       // Reset flag after a delay to allow snapshot to process
       setTimeout(() => {
         isUpdatingRef.current = false;
@@ -1760,7 +1769,7 @@ export default function App() {
       setLoading(false);
       setAppStatus("Error starting war");
       isUpdatingRef.current = false; // Reset flag on error
-      
+
       // Clear any partial war state
       setWarState(null);
       setWarTimer(0);
@@ -1771,18 +1780,18 @@ export default function App() {
   // Stop war
   const stopWar = async () => {
     if (!warState || !warState.active) return;
-    
+
     const updatedWar = {
       ...warState,
       active: false,
       cancelled: true, // Mark as cancelled for clarity
       cancelledAt: Date.now() // Track when it was cancelled
     };
-    
+
     // Save to Firebase first to ensure all users see the cancellation
     console.log("[War Cancel] Cancelling war and syncing to Firebase");
     await saveSharedRoom({ war: updatedWar });
-    
+
     // Update local state - snapshot listener will also update this, but set it immediately for responsiveness
     setWarState(updatedWar);
     setWarSubmissions({}); // Clear submissions when war is cancelled
@@ -1792,11 +1801,11 @@ export default function App() {
   // Clear/dismiss war card
   const clearWar = async () => {
     if (!warState) return;
-    
+
     // Clear war from Firebase
     console.log("[War Clear] Clearing war state");
     await saveSharedRoom({ war: null });
-    
+
     // Clear local state
     setWarState(null);
     setWarSubmissions({});
@@ -1820,30 +1829,30 @@ export default function App() {
     try {
       // Set flag to prevent snapshot listener from processing this update
       isUpdatingRef.current = true;
-      
+
       // Get current room data
       const docRef = doc(db, SHARED_ROOM_PATH);
       const currentDoc = await getDoc(docRef);
       const currentData = currentDoc.exists() ? currentDoc.data() : {};
-      
+
       // Get existing messages or initialize empty array
       const existingMessages = currentData.messages || [];
-      
+
       // Add new message (limit to last 100 messages to prevent document size issues)
       const updatedMessages = [...existingMessages, message].slice(-100);
-      
+
       // Save to Firebase - only update messages field to minimize snapshot triggers
       await setDoc(docRef, { messages: updatedMessages }, { merge: true });
-      
+
       // Update the ref so snapshot listener knows about this change
       if (lastRoomDataRef.current) {
         lastRoomDataRef.current = { ...lastRoomDataRef.current, messages: updatedMessages };
       }
-      
+
       // Clear input immediately for better UX
       setNewMessage("");
       playBeep();
-      
+
       // Reset flag after a short delay to allow snapshot to process if needed
       setTimeout(() => {
         isUpdatingRef.current = false;
@@ -1870,7 +1879,7 @@ export default function App() {
         const roomMessages = data.messages || [];
         // Ensure messages are sorted by timestamp
         const sortedMessages = [...roomMessages].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-        
+
         // Only update if messages actually changed to prevent unnecessary re-renders
         setMessages(prevMessages => {
           const prevStr = JSON.stringify(prevMessages.map(m => ({ id: m.id, timestamp: m.timestamp })));
@@ -1905,7 +1914,7 @@ export default function App() {
   /* ---------------------------
      WebRTC Voice Call Functions
      --------------------------- */
-  
+
   // WebRTC configuration (using public STUN servers)
   const rtcConfig = {
     iceServers: [
@@ -1918,13 +1927,13 @@ export default function App() {
   // Get user media (microphone)
   const getUserMedia = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
+      const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true
         },
-        video: false 
+        video: false
       });
       localStreamRef.current = stream;
       setLocalStream(stream);
@@ -1940,7 +1949,7 @@ export default function App() {
   // Create peer connection for a user
   const createPeerConnection = (username) => {
     const pc = new RTCPeerConnection(rtcConfig);
-    
+
     // Add local stream tracks
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(track => {
@@ -1952,7 +1961,7 @@ export default function App() {
     pc.ontrack = (event) => {
       console.log(`[Voice] Received remote stream from ${username}`);
       const [remoteStream] = event.streams;
-      
+
       setRemoteStreams(prev => {
         const newMap = new Map(prev);
         newMap.set(username, remoteStream);
@@ -1964,6 +1973,8 @@ export default function App() {
       audio.srcObject = remoteStream;
       audio.autoplay = true;
       audio.volume = isSpeakerMuted ? 0 : 1;
+      // Explicitly play to handle autoplay policies
+      audio.play().catch(e => console.error("[Voice] Audio play error:", e));
       audioElementsRef.current.set(username, audio);
     };
 
@@ -1978,7 +1989,7 @@ export default function App() {
           from: currentLeetCodeUsername,
           to: username,
           type: 'ice-candidate',
-          candidate: event.candidate,
+          candidate: event.candidate.toJSON(), // Serialize to plain object
           timestamp: Date.now()
         }, { merge: true }).catch(err => console.error("Error sending ICE candidate:", err));
       }
@@ -2004,14 +2015,14 @@ export default function App() {
       pc.close();
       peerConnectionsRef.current.delete(username);
     }
-    
+
     const audio = audioElementsRef.current.get(username);
     if (audio) {
       audio.pause();
       audio.srcObject = null;
       audioElementsRef.current.delete(username);
     }
-    
+
     setRemoteStreams(prev => {
       const newMap = new Map(prev);
       newMap.delete(username);
@@ -2039,10 +2050,10 @@ export default function App() {
       // Check if there's already an active call
       const roomDoc = await getDoc(doc(db, SHARED_ROOM_PATH));
       const existingCall = roomDoc.exists() ? roomDoc.data()?.voiceCall : null;
-      
+
       let participants = [];
       let isJoiningExistingCall = false;
-      
+
       if (existingCall && existingCall.active) {
         // Join existing call
         isJoiningExistingCall = true;
@@ -2092,9 +2103,9 @@ export default function App() {
         if (peerConnectionsRef.current.has(username)) {
           continue;
         }
-        
+
         const pc = createPeerConnection(username);
-        
+
         // Create and send offer
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
@@ -2107,7 +2118,7 @@ export default function App() {
           from: currentLeetCodeUsername,
           to: username,
           type: 'offer',
-          offer: offer,
+          offer: { type: offer.type, sdp: offer.sdp }, // Serialize to plain object
           timestamp: Date.now()
         }, { merge: true });
       }
@@ -2158,13 +2169,13 @@ export default function App() {
         if (currentDoc.exists()) {
           const currentData = currentDoc.data();
           const voiceCall = currentData.voiceCall;
-          
+
           if (voiceCall && voiceCall.active && voiceCall.participants) {
             // Remove current user from participants
             const updatedParticipants = voiceCall.participants.filter(
               (p) => p !== currentLeetCodeUsername
             );
-            
+
             if (updatedParticipants.length === 0) {
               // No participants left - remove call completely
               await setDoc(docRef, {
@@ -2214,7 +2225,7 @@ export default function App() {
   const toggleSpeakerMute = () => {
     const newMuted = !isSpeakerMuted;
     setIsSpeakerMuted(newMuted);
-    
+
     // Update all audio elements
     audioElementsRef.current.forEach((audio) => {
       audio.volume = newMuted ? 0 : 1;
@@ -2240,32 +2251,40 @@ export default function App() {
     );
 
     const unsubSignaling = onSnapshot(q, async (snapshot) => {
-      snapshot.docChanges().forEach(async (change) => {
+      // Sort changes by timestamp ASCENDING to ensure Offers are processed before Candidates
+      const changes = snapshot.docChanges();
+      changes.sort((a, b) => {
+        const da = a.doc.data();
+        const db = b.doc.data();
+        return (da.timestamp || 0) - (db.timestamp || 0);
+      });
+
+      for (const change of changes) {
         if (change.type !== 'added') return; // Only process new messages
-        
+
         const data = change.doc.data();
         const fromUser = data.from;
-        
+
         if (!fromUser || fromUser === currentLeetCodeUsername) return;
-        
+
         // Handle offer
         if (data.type === 'offer' && data.offer) {
           console.log(`[Voice] Received offer from ${fromUser}`);
-          
+
           // Create peer connection if it doesn't exist
           let pc = peerConnectionsRef.current.get(fromUser);
           if (!pc) {
             pc = createPeerConnection(fromUser);
           }
-          
+
           try {
             // Set remote description
             await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
-            
+
             // Create and send answer
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
-            
+
             // Send answer via Firebase
             const answerDocId = `answer_${currentLeetCodeUsername}_${fromUser}_${Date.now()}`;
             const roomDocRef = doc(db, SHARED_ROOM_PATH);
@@ -2274,18 +2293,18 @@ export default function App() {
               from: currentLeetCodeUsername,
               to: fromUser,
               type: 'answer',
-              answer: answer,
+              answer: { type: answer.type, sdp: answer.sdp }, // Serialize to plain object
               timestamp: Date.now()
             }, { merge: true });
           } catch (err) {
             console.error(`[Voice] Error handling offer from ${fromUser}:`, err);
           }
         }
-        
+
         // Handle answer
         if (data.type === 'answer' && data.answer) {
           console.log(`[Voice] Received answer from ${fromUser}`);
-          
+
           const pc = peerConnectionsRef.current.get(fromUser);
           if (pc && pc.signalingState !== 'stable') {
             try {
@@ -2295,7 +2314,7 @@ export default function App() {
             }
           }
         }
-        
+
         // Handle ICE candidate
         if (data.type === 'ice-candidate' && data.candidate) {
           const pc = peerConnectionsRef.current.get(fromUser);
@@ -2307,7 +2326,7 @@ export default function App() {
             }
           }
         }
-      });
+      }
     }, (err) => {
       console.error("[Voice] Signaling listener error:", err);
     });
@@ -2323,18 +2342,18 @@ export default function App() {
     const unsubSent = onSnapshot(qSent, async (snapshot) => {
       snapshot.docChanges().forEach(async (change) => {
         if (change.type !== 'added') return;
-        
+
         const data = change.doc.data();
         const toUser = data.to;
-        
+
         if (!toUser || toUser === currentLeetCodeUsername) return;
-        
+
         // Handle answer (response to our offer)
         if (data.type === 'answer' && data.answer) {
           // This shouldn't happen as we're the sender, but handle it just in case
           console.log(`[Voice] Received our own answer - this shouldn't happen`);
         }
-        
+
         // Handle ICE candidate (from the other user responding to our offer)
         // This is handled by the main listener above
       });
@@ -2390,7 +2409,7 @@ export default function App() {
   // Ref to store checkSubmissions function for manual refresh
   const checkSubmissionsRef = useRef(null);
   const isCheckingRef = useRef(false);
-  
+
   // Manual refresh function for submissions
   const manualRefreshSubmissions = async () => {
     if (!warState || !warState.active || warState.winner || warState.cancelled || !warState.problemSlug) {
@@ -2398,13 +2417,13 @@ export default function App() {
       setTimeout(() => setError(null), 2200);
       return;
     }
-    
+
     if (isCheckingRef.current) {
       setError("Already checking submissions, please wait...");
       setTimeout(() => setError(null), 2200);
       return;
     }
-    
+
     // Call the check function if available
     if (checkSubmissionsRef.current) {
       console.log("[Manual Refresh] Manually triggering submission check");
@@ -2437,29 +2456,29 @@ export default function App() {
       checkSubmissionsRef.current = null;
       return;
     }
-    
+
     // No intervals needed - only manual refresh
     let isRateLimited = false;
     let backoffTimeout = null;
     const warStateRef = { current: warState }; // Ref to track latest warState
-    
+
     // Update ref when warState changes
     const updateRef = () => {
       warStateRef.current = warState;
     };
     updateRef();
-    
+
     // Track last check time to prevent too frequent manual checks
     let lastCheckTime = 0;
     const MIN_CHECK_INTERVAL = 30 * 1000; // Minimum 30 seconds between manual checks
-    
+
     const checkSubmissions = async () => {
       // Skip if rate limited - wait for backoff period
       if (isRateLimited) {
         console.log("[War Check] Skipping check - rate limited, waiting...");
         return;
       }
-      
+
       // Prevent checks too close together (additional safety)
       const now = Date.now();
       if (now - lastCheckTime < MIN_CHECK_INTERVAL) {
@@ -2467,7 +2486,7 @@ export default function App() {
         return;
       }
       lastCheckTime = now;
-      
+
       // Get latest warState from ref to avoid stale closure
       const currentWar = warStateRef.current;
       // Stop checking if war is not active, has winner, is cancelled, or missing problem slug
@@ -2479,26 +2498,26 @@ export default function App() {
         }
         return;
       }
-      
+
       console.log(`[War Check] Checking submissions for problem: ${currentWar.problemSlug}, started at: ${new Date(currentWar.startTime).toISOString()}`);
-      
+
       try {
         // Start with existing submissions from warState
         const updatedSubmissions = { ...(currentWar.submissions || {}) };
         const updatedCounts = { ...(currentWar.submissionCounts || {}) };
         let winner = null;
         let hasUpdates = false;
-        
+
         // Check each participant's recent submissions for the specific problem
         // Process sequentially with longer delays to avoid rate limits
         for (let index = 0; index < currentWar.participants.length; index++) {
           const username = currentWar.participants[index];
-          
+
           // Longer delay between requests to avoid rate limits (5 seconds per user)
           if (index > 0) {
             await new Promise(r => setTimeout(r, 5000)); // 5 second delay between each user to reduce rate limiting
           }
-          
+
           try {
             // Fetch more submissions to ensure we get all submissions since war started
             // Note: LeetCode's public API is limited to ~20 most recent submissions
@@ -2507,18 +2526,18 @@ export default function App() {
             // For safety, fetch at least 50 submissions, but API may only return 20
             const warDurationMinutes = (Date.now() - currentWar.startTime) / (1000 * 60);
             const estimatedLimit = Math.max(50, Math.min(200, Math.ceil(warDurationMinutes * 2))); // Assume max 2 submissions per minute
-            
+
             console.log(`[War Check] Fetching submissions for ${username} with limit=${estimatedLimit} (war started ${Math.round(warDurationMinutes)} minutes ago)`);
             const submission = await fetchWithRetry(`${API_BASE_URL}/${username}/submission?limit=${estimatedLimit}`);
-            
+
             if (submission && Array.isArray(submission) && submission.length > 0) {
               console.log(`[War Check] Fetched ${submission.length} submissions for ${username} (requested ${estimatedLimit})`);
-              
+
               // Warn if we got fewer submissions than requested (API limitation)
               if (submission.length < estimatedLimit && submission.length < 50) {
                 console.warn(`[War Check] ⚠️ API only returned ${submission.length} submissions (requested ${estimatedLimit}). This may be an API limitation.`);
               }
-              
+
               // Check if the oldest submission is still within war time
               // If not, we might be missing submissions due to API limit
               const oldestSubmission = submission[submission.length - 1];
@@ -2528,25 +2547,25 @@ export default function App() {
                   console.warn(`[War Check] ⚠️ Oldest submission (${new Date(oldestTime).toISOString()}) is still within war time, but we got ${submission.length} submissions. API may be limiting results.`);
                 }
               }
-              
+
               // Find all submissions for this specific problem during the war
               let submissionCount = 0;
               let latestSubmission = null;
               let latestTime = 0;
-              
+
               for (const sub of submission) {
                 const submissionTime = parseInt(sub.timestamp || "0", 10) * 1000;
-                
+
                 // Debug: Log submission details
                 if (submissionTime >= currentWar.startTime) {
                   console.log(`[War Check] ${username} submission at ${new Date(submissionTime).toISOString()}: ${sub.title || sub.titleSlug || "Unknown"} - Status: ${sub.statusDisplay || sub.status || sub.statusCode}`);
                 }
-                
+
                 // Only count submissions made during the war
                 if (submissionTime < currentWar.startTime) {
                   continue; // Skip submissions before war started
                 }
-                
+
                 // Normalize both problem slug and submission slug for comparison
                 // Remove all special characters and normalize spaces/hyphens
                 const normalizeSlug = (slug) => {
@@ -2557,14 +2576,14 @@ export default function App() {
                     .replace(/-+/g, "-")          // Replace multiple hyphens with single
                     .replace(/^-|-$/g, "");        // Remove leading/trailing hyphens
                 };
-                
+
                 const problemSlug = normalizeSlug(currentWar.problemSlug);
                 const warProblemTitle = normalizeSlug((currentWar.problemTitle || "").replace(/\s+/g, "-"));
                 const titleSlug = normalizeSlug(sub.titleSlug);
                 const submissionTitle = normalizeSlug((sub.title || "").replace(/\s+/g, "-"));
-                
+
                 // Try multiple ways to match the problem
-                const slugMatch = 
+                const slugMatch =
                   // Exact matches (most reliable) - check slug to slug
                   titleSlug === problemSlug ||
                   // Check if submission title matches war problem title (if we have it)
@@ -2581,7 +2600,7 @@ export default function App() {
                     const matchingWords = slugWords.filter(word => titleWords.includes(word));
                     return matchingWords.length >= Math.min(2, Math.min(slugWords.length, titleWords.length));
                   })();
-                
+
                 // Log all submissions during war for debugging
                 if (submissionTime >= currentWar.startTime) {
                   console.log(`[War Check] 🔍 Checking match for ${username}:`, {
@@ -2599,11 +2618,11 @@ export default function App() {
                     timestamp: new Date(submissionTime).toISOString()
                   });
                 }
-                
+
                 if (slugMatch) {
                   submissionCount++;
                   console.log(`[War Check] ✓✓✓ MATCH FOUND for ${username}: ${sub.title || sub.titleSlug} - Status: ${sub.statusDisplay || sub.status || sub.statusCode} - Time: ${new Date(submissionTime).toISOString()}`);
-                  
+
                   // Track the latest submission
                   if (submissionTime > latestTime) {
                     latestTime = submissionTime;
@@ -2612,34 +2631,34 @@ export default function App() {
                   }
                 }
               }
-              
+
               // Update submission count
               if (submissionCount > 0) {
                 updatedCounts[username] = submissionCount;
                 hasUpdates = true;
                 console.log(`[War Check] ${username} has ${submissionCount} submission(s) during war`);
               }
-              
+
               // Update latest submission status
               if (latestSubmission) {
                 // Try multiple ways to get the status - LeetCode API can return it in different fields
-                const status = latestSubmission.statusDisplay || 
-                              latestSubmission.status || 
-                              latestSubmission.statusCode || 
-                              latestSubmission.status_code ||
-                              (latestSubmission.statusDisplay === undefined && latestSubmission.status === undefined ? 
-                                (latestSubmission.statusCode === 10 ? "Accepted" : 
-                                 latestSubmission.statusCode === 11 ? "Wrong Answer" :
-                                 latestSubmission.statusCode === 12 ? "Memory Limit Exceeded" :
-                                 latestSubmission.statusCode === 13 ? "Output Limit Exceeded" :
-                                 latestSubmission.statusCode === 14 ? "Time Limit Exceeded" :
-                                 latestSubmission.statusCode === 15 ? "Runtime Error" :
-                                 latestSubmission.statusCode === 16 ? "Internal Error" :
-                                 latestSubmission.statusCode === 20 ? "Compile Error" :
-                                 "Unknown") : "Unknown");
-                
+                const status = latestSubmission.statusDisplay ||
+                  latestSubmission.status ||
+                  latestSubmission.statusCode ||
+                  latestSubmission.status_code ||
+                  (latestSubmission.statusDisplay === undefined && latestSubmission.status === undefined ?
+                    (latestSubmission.statusCode === 10 ? "Accepted" :
+                      latestSubmission.statusCode === 11 ? "Wrong Answer" :
+                        latestSubmission.statusCode === 12 ? "Memory Limit Exceeded" :
+                          latestSubmission.statusCode === 13 ? "Output Limit Exceeded" :
+                            latestSubmission.statusCode === 14 ? "Time Limit Exceeded" :
+                              latestSubmission.statusCode === 15 ? "Runtime Error" :
+                                latestSubmission.statusCode === 16 ? "Internal Error" :
+                                  latestSubmission.statusCode === 20 ? "Compile Error" :
+                                    "Unknown") : "Unknown");
+
                 const existingSubmission = updatedSubmissions[username];
-                
+
                 // Always update if we don't have a submission, or if this is newer (even by 1ms)
                 if (!existingSubmission || latestTime >= existingSubmission.time) {
                   console.log(`[War Check] Updating ${username} status: ${status} (time: ${new Date(latestTime).toISOString()})`);
@@ -2651,7 +2670,7 @@ export default function App() {
                     title: latestSubmission.title,
                     titleSlug: latestSubmission.titleSlug
                   });
-                  
+
                   updatedSubmissions[username] = {
                     status: status,
                     time: latestTime,
@@ -2659,14 +2678,14 @@ export default function App() {
                     memory: latestSubmission.memory || latestSubmission.memoryDisplay || "N/A"
                   };
                   hasUpdates = true;
-                  
+
                   // Check if this is the first accepted submission
-                  const isAccepted = status === "Accepted" || 
-                                    String(status).toLowerCase().includes("accepted") ||
-                                    String(status) === "10" || // LeetCode sometimes uses status codes
-                                    String(latestSubmission.statusCode) === "10" ||
-                                    latestSubmission.statusCode === 10 ||
-                                    latestSubmission.status_code === 10;
+                  const isAccepted = status === "Accepted" ||
+                    String(status).toLowerCase().includes("accepted") ||
+                    String(status) === "10" || // LeetCode sometimes uses status codes
+                    String(latestSubmission.statusCode) === "10" ||
+                    latestSubmission.statusCode === 10 ||
+                    latestSubmission.status_code === 10;
                   if (isAccepted && !winner) {
                     console.log(`[War Check] 🏆 Winner found: ${username} with Accepted submission!`);
                     winner = username;
@@ -2677,9 +2696,9 @@ export default function App() {
               } else if (submissionCount === 0 && currentWar.problemSlug) {
                 // No matching submissions found - log for debugging
                 console.log(`[War Check] ⚠️ No match found for ${username} with problem slug: ${currentWar.problemSlug} during war (started at ${new Date(currentWar.startTime).toISOString()})`);
-                console.log(`[War Check] Available submissions (first 3):`, submission.slice(0, 3).map(s => ({ 
-                  title: s.title, 
-                  titleSlug: s.titleSlug, 
+                console.log(`[War Check] Available submissions (first 3):`, submission.slice(0, 3).map(s => ({
+                  title: s.title,
+                  titleSlug: s.titleSlug,
                   time: new Date(parseInt(s.timestamp || "0", 10) * 1000).toISOString(),
                   status: s.statusDisplay || s.status || s.statusCode
                 })));
@@ -2710,37 +2729,37 @@ export default function App() {
             }
           }
         }
-        
+
         // Always update submissions state (even if no new ones found, sync existing ones)
         // This ensures UI stays in sync with Firebase
         const submissionsChanged = JSON.stringify(updatedSubmissions) !== JSON.stringify(currentWar.submissions || {});
         const countsChanged = JSON.stringify(updatedCounts) !== JSON.stringify(currentWar.submissionCounts || {});
-        
+
         console.log(`[War Check] ===== SUMMARY =====`);
         console.log(`[War Check] hasUpdates: ${hasUpdates}, submissionsChanged: ${submissionsChanged}, countsChanged: ${countsChanged}`);
         console.log(`[War Check] Winner: ${winner || "None yet"}`);
         console.log(`[War Check] Updated submissions:`, JSON.stringify(updatedSubmissions, null, 2));
         console.log(`[War Check] Updated counts:`, JSON.stringify(updatedCounts, null, 2));
         console.log(`[War Check] ===================`);
-        
+
         // Always update to ensure UI is in sync, even if no changes detected
         // Force update by always setting state (React will handle deduplication)
         setWarSubmissions(updatedSubmissions);
-        
+
         // Use functional update to merge with latest state
         // Always save to Firebase when there are changes to ensure sync
         setWarState(prevWar => {
           if (!prevWar || prevWar.problemSlug !== currentWar.problemSlug) {
             return prevWar; // Don't update if war changed
           }
-          
+
           // Always create a new object to force React to detect the update
-          const updatedWar = { 
-            ...prevWar, 
+          const updatedWar = {
+            ...prevWar,
             submissions: updatedSubmissions,
             submissionCounts: updatedCounts
           };
-          
+
           if (winner) {
             console.log(`[War Check] 🎉🎉🎉 WAR ENDED! Winner: ${winner} 🎉🎉🎉`);
             updatedWar.active = false;
@@ -2759,11 +2778,11 @@ export default function App() {
             // This ensures status updates are synced across all users
             if (submissionsChanged || countsChanged || hasUpdates) {
               console.log(`[War Check] Saving updates to Firebase...`);
-            saveSharedRoom({ war: updatedWar }).then(() => {
+              saveSharedRoom({ war: updatedWar }).then(() => {
                 console.log(`[War Check] ✓ War state saved to Firebase`);
               }).catch(err => {
                 console.error(`[War Check] ✗ Error saving to Firebase:`, err);
-            });
+              });
             }
             // Update ref immediately
             warStateRef.current = updatedWar;
@@ -2774,19 +2793,19 @@ export default function App() {
         console.error("Error checking for winner:", e);
       }
     };
-    
+
     // NO AUTOMATIC POLLING - only manual refresh via button to avoid rate limiting
     // Store check function in ref for manual refresh only
     checkSubmissionsRef.current = checkSubmissions;
-    
+
     // User must click "Refresh" button to check submissions - no automatic intervals
-    
+
     // Update ref when warState changes (no interval needed)
     const updateRefOnChange = () => {
       warStateRef.current = warState;
     };
     updateRefOnChange();
-    
+
     return () => {
       if (checkInterval) clearInterval(checkInterval);
       if (backoffTimeout) clearTimeout(backoffTimeout);
@@ -2801,12 +2820,12 @@ export default function App() {
       setWarTimer(0);
       return;
     }
-    
+
     const updateTimer = () => {
       const elapsed = Math.floor((Date.now() - warState.startTime) / 1000);
       const remaining = Math.max(0, warState.duration - elapsed);
       setWarTimer(remaining);
-      
+
       if (remaining === 0 && warState.active) {
         // War ended without winner - only save once
         const updatedWar = { ...warState, active: false };
@@ -2817,7 +2836,7 @@ export default function App() {
         }
       }
     };
-    
+
     updateTimer();
     const interval = setInterval(updateTimer, 1000);
     return () => clearInterval(interval);
@@ -2921,11 +2940,11 @@ export default function App() {
   // Only show error screen for critical initialization failures
   if (error && error.includes("Firebase initialization error") && !db) {
     return (
-      <div style={{ 
-        display: "flex", 
-        flexDirection: "column", 
-        alignItems: "center", 
-        justifyContent: "center", 
+      <div style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
         minHeight: "100vh",
         padding: "20px",
         fontFamily: "Inter, sans-serif",
@@ -2939,8 +2958,8 @@ export default function App() {
         <p style={{ fontSize: "14px", color: "#9ca3af", marginTop: "16px" }}>
           Please check the browser console for more details.
         </p>
-        <button 
-          onClick={() => window.location.reload()} 
+        <button
+          onClick={() => window.location.reload()}
           style={{
             marginTop: "20px",
             padding: "12px 24px",
@@ -3494,10 +3513,10 @@ export default function App() {
               You will be added to this existing room. If you want to create a new room, please use a different name.
             </p>
             {duplicateRoomInfo.usernames && duplicateRoomInfo.usernames.length > 0 && (
-              <div style={{ 
-                marginBottom: "20px", 
-                padding: "12px", 
-                background: "var(--sky-50)", 
+              <div style={{
+                marginBottom: "20px",
+                padding: "12px",
+                background: "var(--sky-50)",
                 borderRadius: "8px",
                 border: "1px solid var(--border)"
               }}>
@@ -3506,9 +3525,9 @@ export default function App() {
                 </div>
                 <div style={{ fontSize: "12px", color: "var(--muted)", display: "flex", flexWrap: "wrap", gap: "6px" }}>
                   {duplicateRoomInfo.usernames.map((u, idx) => (
-                    <span key={idx} style={{ 
-                      padding: "4px 8px", 
-                      background: "var(--card)", 
+                    <span key={idx} style={{
+                      padding: "4px 8px",
+                      background: "var(--card)",
                       borderRadius: "6px",
                       border: "1px solid var(--border)"
                     }}>
@@ -3631,9 +3650,9 @@ export default function App() {
                             <button className="room-btn-small" onClick={() => startEditRoom(room.id)} title="Rename">
                               <Edit className="icon" style={{ width: 14, height: 14 }} />
                             </button>
-                            <button 
-                              className="room-btn-small" 
-                              onClick={(e) => { e.stopPropagation(); exitRoom(room.id); }} 
+                            <button
+                              className="room-btn-small"
+                              onClick={(e) => { e.stopPropagation(); exitRoom(room.id); }}
                               title="Exit Room"
                               style={{ color: "var(--error, #ef4444)" }}
                             >
@@ -3718,7 +3737,7 @@ export default function App() {
                     <div>
                       <Zap className="icon" />
                       <div style={{ marginTop: 8, fontWeight: 700 }}>No opponents yet</div>
-                      <div className="muted" style={{ marginTop:4 }}>Add usernames to begin</div>
+                      <div className="muted" style={{ marginTop: 4 }}>Add usernames to begin</div>
                     </div>
                   </div>
                 ) : friendUsernames.map(u => (
@@ -3742,12 +3761,12 @@ export default function App() {
                 ))}
               </div>
 
-              <div className="stats" style={{ marginTop:16 }}>
+              <div className="stats" style={{ marginTop: 16 }}>
                 <div>
                   <div className="stats-left">Auto-sync</div>
                 </div>
                 <div>
-                  <div className="stats-num">{leaderboardData.reduce((a,b) => a + (b.counts?.all || 0), 0)} total solves</div>
+                  <div className="stats-num">{leaderboardData.reduce((a, b) => a + (b.counts?.all || 0), 0)} total solves</div>
                 </div>
               </div>
             </div>
@@ -3755,10 +3774,10 @@ export default function App() {
             <div style={{ height: 12 }} />
 
             <div className="card">
-              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <div>
                   <div className="muted">Quick Actions</div>
-                  <div style={{ marginTop:6 }}>
+                  <div style={{ marginTop: 6 }}>
                     <button className="btn-outline" onClick={() => { fetchAllUsersData(); playBeep(); }}>Sync Now</button>
                   </div>
                 </div>
@@ -3769,10 +3788,10 @@ export default function App() {
 
             {/* Chat Component */}
             <div className="card chat-card">
-              <div style={{ 
-                display: "flex", 
-                justifyContent: "space-between", 
-                alignItems: "center", 
+              <div style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
                 marginBottom: 16,
                 paddingBottom: 12,
                 borderBottom: "2px solid rgba(6,182,212,0.1)"
@@ -3791,12 +3810,12 @@ export default function App() {
                     <MessageCircle className="icon" style={{ width: 20, height: 20, color: "white" }} />
                   </div>
                   <div>
-                    <h3 style={{ 
-                      margin: 0, 
-                      fontSize: "18px", 
-                      fontWeight: 700, 
-                      background: "linear-gradient(135deg, #06b6d4, #7c3aed)", 
-                      WebkitBackgroundClip: "text", 
+                    <h3 style={{
+                      margin: 0,
+                      fontSize: "18px",
+                      fontWeight: 700,
+                      background: "linear-gradient(135deg, #06b6d4, #7c3aed)",
+                      WebkitBackgroundClip: "text",
                       WebkitTextFillColor: "transparent",
                       backgroundClip: "text"
                     }}>
@@ -3893,7 +3912,7 @@ export default function App() {
                       {callParticipants.length} {callParticipants.length === 1 ? "participant" : "participants"}
                     </div>
                   </div>
-                  
+
                   {isCallActive && isInCall && (
                     <div style={{ display: "flex", gap: "8px", justifyContent: "center" }}>
                       <button
@@ -3922,7 +3941,7 @@ export default function App() {
                         )}
                         {isMuted ? "Unmute" : "Mute"}
                       </button>
-                      
+
                       <button
                         className="voice-control-btn"
                         onClick={toggleSpeakerMute}
@@ -3951,18 +3970,18 @@ export default function App() {
                       </button>
                     </div>
                   )}
-                  
+
                   {callParticipants.length > 0 && (
                     <div style={{ fontSize: "11px", color: "var(--muted)", marginTop: "4px" }}>
                       Participants: {callParticipants.join(", ")}
                     </div>
                   )}
-                  
+
                   {!isInCall && isCallActive && (
-                    <div style={{ 
-                      marginTop: "8px", 
-                      padding: "8px", 
-                      borderRadius: "6px", 
+                    <div style={{
+                      marginTop: "8px",
+                      padding: "8px",
+                      borderRadius: "6px",
                       background: "var(--sky-50)",
                       border: "1px solid var(--sky-200)",
                       fontSize: "12px",
@@ -3976,18 +3995,18 @@ export default function App() {
               )}
 
               {/* Messages List */}
-              <div className="chat-messages" style={{ 
-                maxHeight: "300px", 
-                overflowY: "auto", 
+              <div className="chat-messages" style={{
+                maxHeight: "300px",
+                overflowY: "auto",
                 marginBottom: 12,
                 padding: "10px 8px",
                 borderRadius: "8px",
                 minHeight: "150px"
               }}>
                 {messages.length === 0 ? (
-                  <div style={{ 
-                    textAlign: "center", 
-                    padding: "30px 20px", 
+                  <div style={{
+                    textAlign: "center",
+                    padding: "30px 20px",
                     color: "var(--muted)",
                     fontSize: "12px",
                     display: "flex",
@@ -4016,10 +4035,10 @@ export default function App() {
                     const messageDate = new Date(msg.timestamp);
                     const timeStr = messageDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
                     const showAvatar = !isCurrentUser && (index === 0 || messages[index - 1].username !== msg.username);
-                    
+
                     return (
-                      <div 
-                        key={msg.id} 
+                      <div
+                        key={msg.id}
                         className={`chat-message ${isCurrentUser ? "chat-message-own" : ""}`}
                         style={{
                           marginBottom: "8px",
@@ -4057,17 +4076,17 @@ export default function App() {
                         )}
                         <div style={{ flex: 1, minWidth: 0 }}>
                           {!isCurrentUser && showAvatar && (
-                            <div style={{ 
-                              fontSize: "11px", 
-                              fontWeight: 600, 
+                            <div style={{
+                              fontSize: "11px",
+                              fontWeight: 600,
                               color: "var(--text)",
                               marginBottom: "3px"
                             }}>
                               {msg.username}
                             </div>
                           )}
-                          <div style={{ 
-                            fontSize: "13px", 
+                          <div style={{
+                            fontSize: "13px",
                             color: isCurrentUser ? "white" : "var(--text)",
                             wordBreak: "break-word",
                             lineHeight: "1.4",
@@ -4075,9 +4094,9 @@ export default function App() {
                           }}>
                             {msg.text}
                           </div>
-                          <div style={{ 
-                            fontSize: "9px", 
-                            color: isCurrentUser ? "rgba(255,255,255,0.6)" : "var(--muted)", 
+                          <div style={{
+                            fontSize: "9px",
+                            color: isCurrentUser ? "rgba(255,255,255,0.6)" : "var(--muted)",
                             marginTop: "3px",
                             textAlign: isCurrentUser ? "right" : "left",
                             display: "flex",
@@ -4098,7 +4117,7 @@ export default function App() {
               </div>
 
               {/* Message Input */}
-              <form 
+              <form
                 className="chat-input-form"
                 onSubmit={(e) => {
                   e.preventDefault();
@@ -4134,11 +4153,11 @@ export default function App() {
                     War Active!
                   </div>
                   <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-                    <button 
-                      className="stop-war-btn" 
+                    <button
+                      className="stop-war-btn"
                       onClick={manualRefreshSubmissions}
                       title="Refresh submissions"
-                      style={{ 
+                      style={{
                         padding: "6px 12px",
                         fontSize: "12px",
                         display: "flex",
@@ -4149,10 +4168,10 @@ export default function App() {
                       <Loader2 className="icon" style={{ width: 12, height: 12 }} />
                       Refresh
                     </button>
-                  <button className="stop-war-btn" onClick={stopWar}>
-                    <X className="icon" style={{ width: 14, height: 14 }} />
-                    Stop
-                  </button>
+                    <button className="stop-war-btn" onClick={stopWar}>
+                      <X className="icon" style={{ width: 14, height: 14 }} />
+                      Stop
+                    </button>
                   </div>
                 </div>
                 <div className="war-timer">
@@ -4163,7 +4182,7 @@ export default function App() {
                   <Target className="icon" style={{ width: 18, height: 18 }} />
                   Solve Problem
                 </a>
-                
+
                 {/* Submission Status */}
                 {warState.participants && warState.participants.length > 0 && (
                   <div className="war-submissions">
@@ -4209,8 +4228,8 @@ export default function App() {
                   <div className="war-title">
                     {warState.winner ? (
                       <>
-                    <Award className="icon" style={{ width: 24, height: 24 }} />
-                    War Ended
+                        <Award className="icon" style={{ width: 24, height: 24 }} />
+                        War Ended
                       </>
                     ) : (
                       <>
@@ -4219,8 +4238,8 @@ export default function App() {
                       </>
                     )}
                   </div>
-                  <button 
-                    className="stop-war-btn" 
+                  <button
+                    className="stop-war-btn"
                     onClick={clearWar}
                     title="Close war card"
                     style={{ cursor: "pointer" }}
@@ -4229,19 +4248,19 @@ export default function App() {
                   </button>
                 </div>
                 {warState.winner && (
-                <div className="war-winner">
-                  <Crown className="icon" style={{ width: 32, height: 32, color: "#d97706" }} />
-                  <div>
-                    <div className="war-status">Winner</div>
-                    <div className="war-winner-name">{warState.winner}</div>
+                  <div className="war-winner">
+                    <Crown className="icon" style={{ width: 32, height: 32, color: "#d97706" }} />
+                    <div>
+                      <div className="war-status">Winner</div>
+                      <div className="war-winner-name">{warState.winner}</div>
+                    </div>
                   </div>
-                </div>
                 )}
                 {warState.problemLink && (
-                <a href={warState.problemLink} target="_blank" rel="noopener noreferrer" className="war-problem-link" style={{ marginTop: 16 }}>
-                  <Target className="icon" style={{ width: 18, height: 18 }} />
-                  View Problem
-                </a>
+                  <a href={warState.problemLink} target="_blank" rel="noopener noreferrer" className="war-problem-link" style={{ marginTop: 16 }}>
+                    <Target className="icon" style={{ width: 18, height: 18 }} />
+                    View Problem
+                  </a>
                 )}
               </div>
             ) : (
@@ -4302,29 +4321,29 @@ export default function App() {
             )}
 
             <div className="card">
-              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
-                <div style={{ display:"flex", gap:10, alignItems:"center" }}>
-                  <Trophy className="icon" style={{ color:"#b45309" }} />
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                  <Trophy className="icon" style={{ color: "#b45309" }} />
                   <div>
                     <div className="muted">Leaderboard</div>
-                    <div style={{ fontWeight:800, fontSize:18 }}>Combat Rankings</div>
+                    <div style={{ fontWeight: 800, fontSize: 18 }}>Combat Rankings</div>
                   </div>
                 </div>
-                <div className="muted" style={{ fontSize:13 }}>Filter: <strong style={{ marginLeft:8, textTransform:"uppercase" }}>{timeFilter}</strong></div>
+                <div className="muted" style={{ fontSize: 13 }}>Filter: <strong style={{ marginLeft: 8, textTransform: "uppercase" }}>{timeFilter}</strong></div>
               </div>
 
               <div className="leaderboard">
                 {loading ? (
-                  [1,2,3,4].map(i => <div className="placeholder" key={i} />)
+                  [1, 2, 3, 4].map(i => <div className="placeholder" key={i} />)
                 ) : (sortedLeaderboard.length > 0 ? (
-                  sortedLeaderboard.map((u, i) => <LeaderboardRow key={u.username} user={u} rank={i+1} />)
+                  sortedLeaderboard.map((u, i) => <LeaderboardRow key={u.username} user={u} rank={i + 1} />)
                 ) : (
-                  <div style={{ textAlign:"center", padding:28 }}>
-                    <div style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", width:80, height:80, borderRadius:20, background:"#f8fafc", margin:"0 auto 12px" }}>
-                      <Trophy className="icon" style={{ color:"#b45309" }} />
+                  <div style={{ textAlign: "center", padding: 28 }}>
+                    <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 80, height: 80, borderRadius: 20, background: "#f8fafc", margin: "0 auto 12px" }}>
+                      <Trophy className="icon" style={{ color: "#b45309" }} />
                     </div>
-                    <div style={{ fontWeight:800, fontSize:16 }}>Leaderboard Empty</div>
-                    <div className="muted" style={{ marginTop:8 }}>Add friends to populate the leaderboard.</div>
+                    <div style={{ fontWeight: 800, fontSize: 16 }}>Leaderboard Empty</div>
+                    <div className="muted" style={{ marginTop: 8 }}>Add friends to populate the leaderboard.</div>
                   </div>
                 ))}
               </div>
@@ -4337,12 +4356,12 @@ export default function App() {
                     <div className="share-btn-copied">
                       <CheckCircle className="icon" style={{ width: 14, height: 14 }} />
                       Link copied!
-              </div>
+                    </div>
                   )}
                   <button className="btn-outline" onClick={copyRoomLink}>
                     <Share2 className="icon" /> Share Room Link
                   </button>
-            </div>
+                </div>
                 <button className="btn-outline" onClick={() => alert("Settings coming soon")}>
                   <Settings className="icon" />
                 </button>
@@ -4359,14 +4378,14 @@ export default function App() {
         </div>
       </div>
 
-      <div id="burst-root" style={{ position:"absolute", inset:0, pointerEvents:"none" }} />
+      <div id="burst-root" style={{ position: "absolute", inset: 0, pointerEvents: "none" }} />
 
       {error && (
         <div className="toast">
-          <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
             <AlertTriangle className="icon" />
             <div>{error}</div>
-            <button onClick={() => setError(null)} style={{ marginLeft:8, border:0, background:"transparent", color:"#6b7280", cursor:"pointer" }}>Dismiss</button>
+            <button onClick={() => setError(null)} style={{ marginLeft: 8, border: 0, background: "transparent", color: "#6b7280", cursor: "pointer" }}>Dismiss</button>
           </div>
         </div>
       )}
