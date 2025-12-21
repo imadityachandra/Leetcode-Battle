@@ -180,6 +180,7 @@ export default function App() {
   const [remoteStreams, setRemoteStreams] = useState(new Map()); // Map of username -> MediaStream
   const [callParticipants, setCallParticipants] = useState([]); // Array of usernames in the call
   const peerConnectionsRef = useRef(new Map());
+  const pendingCandidatesRef = useRef(new Map()); // Map of username -> Array of candidates
   const localStreamRef = useRef(null);
   const signalingChannelRef = useRef(null);
   const audioElementsRef = useRef(new Map()); // Map of username -> HTMLAudioElement
@@ -1916,12 +1917,15 @@ export default function App() {
      --------------------------- */
 
   // WebRTC configuration (using public STUN servers)
+  // WebRTC configuration (using public STUN servers)
   const rtcConfig = {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' }
-    ]
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:global.stun.twilio.com:3478' }
+    ],
+    iceCandidatePoolSize: 10
   };
 
   // Get user media (microphone)
@@ -2033,6 +2037,10 @@ export default function App() {
       newMap.delete(username);
       return newMap;
     });
+
+    if (pendingCandidatesRef.current.has(username)) {
+      pendingCandidatesRef.current.delete(username);
+    }
   };
 
   // Start or join voice call
@@ -2286,6 +2294,20 @@ export default function App() {
             // Set remote description
             await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
 
+            // Process any pending ICE candidates
+            const pendingCandidates = pendingCandidatesRef.current.get(fromUser);
+            if (pendingCandidates && pendingCandidates.length > 0) {
+              console.log(`[Voice] Processing ${pendingCandidates.length} buffered candidates for ${fromUser}`);
+              for (const candidate of pendingCandidates) {
+                try {
+                  await pc.addIceCandidate(new RTCIceCandidate(candidate));
+                } catch (err) {
+                  console.error(`[Voice] Error adding buffered ICE candidate from ${fromUser}:`, err);
+                }
+              }
+              pendingCandidatesRef.current.delete(fromUser);
+            }
+
             // Create and send answer
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
@@ -2325,10 +2347,27 @@ export default function App() {
           const pc = peerConnectionsRef.current.get(fromUser);
           if (pc) {
             try {
-              await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+              // Check signaling state before adding candidate
+              if (pc.remoteDescription) {
+                await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+              } else {
+                // Buffer candidate if remote description is not set yet
+                console.log(`[Voice] Buffering ICE candidate from ${fromUser} (remote desc not ready)`);
+                if (!pendingCandidatesRef.current.has(fromUser)) {
+                  pendingCandidatesRef.current.set(fromUser, []);
+                }
+                pendingCandidatesRef.current.get(fromUser).push(data.candidate);
+              }
             } catch (err) {
               console.error(`[Voice] Error adding ICE candidate from ${fromUser}:`, err);
             }
+          } else {
+            // Buffer candidate if PC doesn't exist yet
+            console.log(`[Voice] Buffering ICE candidate from ${fromUser} (PC not ready)`);
+            if (!pendingCandidatesRef.current.has(fromUser)) {
+              pendingCandidatesRef.current.set(fromUser, []);
+            }
+            pendingCandidatesRef.current.get(fromUser).push(data.candidate);
           }
         }
       }
