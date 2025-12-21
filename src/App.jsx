@@ -183,6 +183,7 @@ export default function App() {
   const pendingCandidatesRef = useRef(new Map()); // Map of username -> Array of candidates
   const localStreamRef = useRef(null);
   const signalingChannelRef = useRef(null);
+  const [audioUnlockNeeded, setAudioUnlockNeeded] = useState(false); // State to show unlock button if autoplay fails
   const audioElementsRef = useRef(new Map()); // Map of username -> HTMLAudioElement
 
   // Firestore doc paths
@@ -1980,7 +1981,10 @@ export default function App() {
       // Explicitly play to handle autoplay policies
       audio.play().catch(e => {
         // Ignore AbortError which happens if cleanup occurs during load
-        if (e.name !== 'AbortError') {
+        if (e.name === 'NotAllowedError') {
+          console.warn("[Voice] Autoplay blocked, showing manual unlock UI");
+          setAudioUnlockNeeded(true);
+        } else if (e.name !== 'AbortError') {
           console.error("[Voice] Audio play error:", e);
         }
       });
@@ -2117,23 +2121,26 @@ export default function App() {
           continue;
         }
 
-        const pc = createPeerConnection(username);
-
-        // Create and send offer
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-
-        // Send offer via Firebase - use unique document ID
-        const offerDocId = `offer_${currentLeetCodeUsername}_${username}_${Date.now()}`;
-        const roomDocRef = doc(db, SHARED_ROOM_PATH);
-        const offerDocRef = doc(roomDocRef, 'voiceSignaling', offerDocId);
-        await setDoc(offerDocRef, {
-          from: currentLeetCodeUsername,
-          to: username,
-          type: 'offer',
-          offer: { type: offer.type, sdp: offer.sdp }, // Serialize to plain object
-          timestamp: Date.now()
-        }, { merge: true });
+        // Deterministic Initiator: Only initiate if my username < their username
+        // This prevents "glare" (collisions) where both sides try to offer at once.
+        if (currentLeetCodeUsername < username) {
+          console.log(`[Voice] Initiating connection to ${username} (I am initiator)`);
+          const pc = createPeerConnection(username);
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          const offerDocId = `offer_${currentLeetCodeUsername}_${username}_${Date.now()}`;
+          const roomDocRef = doc(db, SHARED_ROOM_PATH);
+          const offerDocRef = doc(roomDocRef, 'voiceSignaling', offerDocId);
+          await setDoc(offerDocRef, {
+            from: currentLeetCodeUsername,
+            to: username,
+            type: 'offer',
+            offer: { type: offer.type, sdp: offer.sdp },
+            timestamp: Date.now()
+          }, { merge: true });
+        } else {
+          console.log(`[Voice] Waiting for connection from ${username} (I am passive)`);
+        }
       }
 
       setIsCallActive(true);
@@ -2244,6 +2251,14 @@ export default function App() {
       audio.volume = newMuted ? 0 : 1;
     });
     playBeep();
+  };
+
+  // Resume audio manually (for handling autoplay policies)
+  const resumeAudio = () => {
+    audioElementsRef.current.forEach((audio) => {
+      audio.play().catch(e => console.error("Error resuming audio:", e));
+    });
+    setAudioUnlockNeeded(false);
   };
 
   // Listen for voice call signaling and handle WebRTC negotiation
@@ -2377,10 +2392,46 @@ export default function App() {
 
 
 
+
     return () => {
       unsubSignaling();
     };
-  }, [db, SHARED_ROOM_PATH, currentRoomId, currentLeetCodeUsername, friendUsernames, isInCall]);
+  }, [db, SHARED_ROOM_PATH, currentRoomId, currentLeetCodeUsername, /* friendUsernames, */ isInCall]); // Removed friendUsernames to avoid re-subscribing unnecessarily
+
+  // Auto-connect to new participants (Mesh networking)
+  useEffect(() => {
+    if (!isInCall || !db || !currentLeetCodeUsername) return;
+
+    const connectToNewParticipants = async () => {
+      for (const username of callParticipants) {
+        if (username === currentLeetCodeUsername) continue;
+
+        // If we don't have a connection, and we correspond to the deterministic initiator rule
+        if (!peerConnectionsRef.current.has(username) && currentLeetCodeUsername < username) {
+          console.log(`[Voice] Auto-connecting to new participant ${username}`);
+          const pc = createPeerConnection(username);
+          try {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            const offerDocId = `offer_${currentLeetCodeUsername}_${username}_${Date.now()}`;
+            const roomDocRef = doc(db, SHARED_ROOM_PATH);
+            const offerDocRef = doc(roomDocRef, 'voiceSignaling', offerDocId);
+            await setDoc(offerDocRef, {
+              from: currentLeetCodeUsername,
+              to: username,
+              type: 'offer',
+              offer: { type: offer.type, sdp: offer.sdp },
+              timestamp: Date.now()
+            }, { merge: true });
+          } catch (e) {
+            console.error("[Voice] Error auto-connecting:", e);
+          }
+        }
+      }
+    };
+
+    connectToNewParticipants();
+  }, [callParticipants, isInCall, currentLeetCodeUsername, db, SHARED_ROOM_PATH]);
 
   // Voice call state is now synced via the main room snapshot listener above
   // This listener is no longer needed as voiceCall is part of room data
@@ -3927,6 +3978,26 @@ export default function App() {
                       {callParticipants.length} {callParticipants.length === 1 ? "participant" : "participants"}
                     </div>
                   </div>
+
+                  {audioUnlockNeeded && (
+                    <button
+                      onClick={resumeAudio}
+                      style={{
+                        padding: "4px 8px",
+                        borderRadius: "4px",
+                        background: "#fbbf24",
+                        color: "black",
+                        border: "none",
+                        fontSize: "10px",
+                        fontWeight: "bold",
+                        cursor: "pointer",
+                        marginBottom: "8px",
+                        width: "100%"
+                      }}
+                    >
+                      Tap to Hear Others
+                    </button>
+                  )}
 
                   {isCallActive && isInCall && (
                     <div style={{ display: "flex", gap: "8px", justifyContent: "center" }}>
