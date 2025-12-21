@@ -1971,10 +1971,15 @@ export default function App() {
       // Create audio element for remote stream
       const audio = new Audio();
       audio.srcObject = remoteStream;
-      audio.autoplay = true;
+      // audio.autoplay = true; // Removed to avoid conflict with explicit play()
       audio.volume = isSpeakerMuted ? 0 : 1;
       // Explicitly play to handle autoplay policies
-      audio.play().catch(e => console.error("[Voice] Audio play error:", e));
+      audio.play().catch(e => {
+        // Ignore AbortError which happens if cleanup occurs during load
+        if (e.name !== 'AbortError') {
+          console.error("[Voice] Audio play error:", e);
+        }
+      });
       audioElementsRef.current.set(username, audio);
     };
 
@@ -1998,8 +2003,8 @@ export default function App() {
     // Handle connection state changes
     pc.onconnectionstatechange = () => {
       console.log(`[Voice] Connection state with ${username}:`, pc.connectionState);
-      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-        // Clean up on disconnect
+      if (pc.connectionState === 'failed') {
+        // Only clean up on fatal failure, not temporary disconnection
         cleanupPeerConnection(username);
       }
     };
@@ -2068,16 +2073,16 @@ export default function App() {
         console.log(`[Voice] Starting new call with participants: ${participants.join(', ')}`);
       }
 
-      setIsInCall(true);
-      setIsCallActive(false);
-
       // Get user media
       const stream = await getUserMedia();
       if (!stream) {
-        setIsInCall(false);
+        // setIsInCall(false); // Not needed as we haven't set it true yet
         setLoading(false);
         return;
       }
+
+      setIsInCall(true);
+      setIsCallActive(false);
 
       // Update Firebase with new participant list
       await setDoc(doc(db, SHARED_ROOM_PATH), {
@@ -2331,39 +2336,10 @@ export default function App() {
       console.error("[Voice] Signaling listener error:", err);
     });
 
-    // Also listen for messages we sent (to handle answers and ICE candidates from others)
-    const qSent = query(
-      signalingCollection, // Reuse the same collection reference
-      where('from', '==', currentLeetCodeUsername),
-      orderBy('timestamp', 'desc'),
-      limit(50)
-    );
 
-    const unsubSent = onSnapshot(qSent, async (snapshot) => {
-      snapshot.docChanges().forEach(async (change) => {
-        if (change.type !== 'added') return;
-
-        const data = change.doc.data();
-        const toUser = data.to;
-
-        if (!toUser || toUser === currentLeetCodeUsername) return;
-
-        // Handle answer (response to our offer)
-        if (data.type === 'answer' && data.answer) {
-          // This shouldn't happen as we're the sender, but handle it just in case
-          console.log(`[Voice] Received our own answer - this shouldn't happen`);
-        }
-
-        // Handle ICE candidate (from the other user responding to our offer)
-        // This is handled by the main listener above
-      });
-    }, (err) => {
-      console.error("[Voice] Sent signaling listener error:", err);
-    });
 
     return () => {
       unsubSignaling();
-      unsubSent();
     };
   }, [db, SHARED_ROOM_PATH, currentRoomId, currentLeetCodeUsername, friendUsernames, isInCall]);
 
