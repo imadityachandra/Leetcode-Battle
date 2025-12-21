@@ -184,6 +184,7 @@ export default function App() {
   const localStreamRef = useRef(null);
   const signalingChannelRef = useRef(null);
   const [audioUnlockNeeded, setAudioUnlockNeeded] = useState(false); // State to show unlock button if autoplay fails
+  const [debugInfo, setDebugInfo] = useState({}); // Map of username -> { connectionState, signalingState, iceCandidatesCount }
   const audioElementsRef = useRef(new Map()); // Map of username -> HTMLAudioElement
 
   // Firestore doc paths
@@ -2011,10 +2012,29 @@ export default function App() {
     // Handle connection state changes
     pc.onconnectionstatechange = () => {
       console.log(`[Voice] Connection state with ${username}:`, pc.connectionState);
+      setDebugInfo(prev => ({
+        ...prev,
+        [username]: {
+          ...(prev[username] || {}),
+          connectionState: pc.connectionState,
+          signalingState: pc.signalingState
+        }
+      }));
+
       if (pc.connectionState === 'failed') {
         // Only clean up on fatal failure, not temporary disconnection
         cleanupPeerConnection(username);
       }
+    };
+
+    pc.onsignalingstatechange = () => {
+      setDebugInfo(prev => ({
+        ...prev,
+        [username]: {
+          ...(prev[username] || {}),
+          signalingState: pc.signalingState
+        }
+      }));
     };
 
     peerConnectionsRef.current.set(username, pc);
@@ -4047,15 +4067,27 @@ export default function App() {
                           transition: "all 0.2s ease"
                         }}
                       >
-                        {isSpeakerMuted ? (
-                          <VolumeX className="icon" style={{ width: 14, height: 14 }} />
-                        ) : (
-                          <Volume2Icon className="icon" style={{ width: 14, height: 14 }} />
-                        )}
-                        {isSpeakerMuted ? "Unmute" : "Mute"} Speaker
+                        {isSpeakerMuted ? "Unmute Speaker" : "Mute Speaker"}
                       </button>
                     </div>
                   )}
+
+                  {/* Debug Panel */}
+                  {isInCall && (
+                    <div style={{ marginTop: "16px", padding: "10px", background: "#1f2937", borderRadius: "8px", fontSize: "10px", color: "#9ca3af" }}>
+                      <div style={{ fontWeight: "bold", marginBottom: "4px" }}>Voice Debug Info:</div>
+                      <div>My Username: {currentLeetCodeUsername}</div>
+                      <div>Participants: {callParticipants.join(", ")}</div>
+                      <div style={{ marginTop: "4px" }}>
+                        {Object.entries(debugInfo).map(([user, info]) => (
+                          <div key={user} style={{ marginBottom: "2px" }}>
+                            <span style={{ color: "#d1d5db" }}>{user}:</span> {info.connectionState || "unknown"} / {info.signalingState || "unknown"}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
 
                   {callParticipants.length > 0 && (
                     <div style={{ fontSize: "11px", color: "var(--muted)", marginTop: "4px" }}>
@@ -4462,19 +4494,21 @@ export default function App() {
             </div>
           </div>
         </div>
-      </div>
+      </div >
 
       <div id="burst-root" style={{ position: "absolute", inset: 0, pointerEvents: "none" }} />
 
-      {error && (
-        <div className="toast">
-          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-            <AlertTriangle className="icon" />
-            <div>{error}</div>
-            <button onClick={() => setError(null)} style={{ marginLeft: 8, border: 0, background: "transparent", color: "#6b7280", cursor: "pointer" }}>Dismiss</button>
+      {
+        error && (
+          <div className="toast">
+            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+              <AlertTriangle className="icon" />
+              <div>{error}</div>
+              <button onClick={() => setError(null)} style={{ marginLeft: 8, border: 0, background: "transparent", color: "#6b7280", cursor: "pointer" }}>Dismiss</button>
+            </div>
           </div>
-        </div>
-      )}
-    </div>
+        )
+      }
+    </div >
   );
 }
