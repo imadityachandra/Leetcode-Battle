@@ -2340,8 +2340,30 @@ export default function App() {
           }
 
           try {
+            // Perfect Negotiation: Handle signaling collisions (glare)
+            // If we're in the middle of creating an offer and receive one, we need to decide who backs off
+            const isPolite = currentLeetCodeUsername > fromUser; // Alphabetically greater username is "polite"
+            const offerCollision = pc.signalingState !== 'stable';
+
+            if (offerCollision) {
+              console.log(`[Voice] Offer collision detected with ${fromUser}. I am ${isPolite ? 'polite' : 'impolite'}`);
+
+              if (!isPolite) {
+                // Impolite peer ignores the incoming offer
+                console.log(`[Voice] Ignoring offer from ${fromUser} (I am impolite, keeping my offer)`);
+                return;
+              } else {
+                // Polite peer rolls back and accepts the incoming offer
+                console.log(`[Voice] Rolling back my offer and accepting offer from ${fromUser} (I am polite)`);
+                // Rollback: setLocalDescription with type "rollback" is not widely supported
+                // Instead, we'll just proceed with setting remote description
+                // The browser will handle the rollback internally
+              }
+            }
+
             // Set remote description
             await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+            console.log(`[Voice] Remote description set for ${fromUser}`);
 
             // Process any pending ICE candidates
             const pendingCandidates = pendingCandidatesRef.current.get(fromUser);
@@ -2360,6 +2382,7 @@ export default function App() {
             // Create and send answer
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
+            console.log(`[Voice] Created and set answer for ${fromUser}`);
 
             // Send answer via Firebase
             const answerDocId = `answer_${currentLeetCodeUsername}_${fromUser}_${Date.now()}`;
@@ -2372,6 +2395,7 @@ export default function App() {
               answer: { type: answer.type, sdp: answer.sdp }, // Serialize to plain object
               timestamp: Date.now()
             }, { merge: true });
+            console.log(`[Voice] Sent answer to ${fromUser}`);
           } catch (err) {
             console.error(`[Voice] Error handling offer from ${fromUser}:`, err);
           }
@@ -2432,40 +2456,8 @@ export default function App() {
     };
   }, [db, SHARED_ROOM_PATH, currentRoomId, currentLeetCodeUsername, /* friendUsernames, */ isInCall]); // Removed friendUsernames to avoid re-subscribing unnecessarily
 
-  // Auto-connect to new participants (Mesh networking)
-  useEffect(() => {
-    if (!isInCall || !db || !currentLeetCodeUsername) return;
-
-    const connectToNewParticipants = async () => {
-      for (const username of callParticipants) {
-        if (username === currentLeetCodeUsername) continue;
-
-        // If we don't have a connection, and we correspond to the deterministic initiator rule
-        if (!peerConnectionsRef.current.has(username) && currentLeetCodeUsername < username) {
-          console.log(`[Voice] Auto-connecting to new participant ${username}`);
-          const pc = createPeerConnection(username);
-          try {
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            const offerDocId = `offer_${currentLeetCodeUsername}_${username}_${Date.now()}`;
-            const roomDocRef = doc(db, SHARED_ROOM_PATH);
-            const offerDocRef = doc(roomDocRef, 'voiceSignaling', offerDocId);
-            await setDoc(offerDocRef, {
-              from: currentLeetCodeUsername,
-              to: username,
-              type: 'offer',
-              offer: { type: offer.type, sdp: offer.sdp },
-              timestamp: Date.now()
-            }, { merge: true });
-          } catch (e) {
-            console.error("[Voice] Error auto-connecting:", e);
-          }
-        }
-      }
-    };
-
-    connectToNewParticipants();
-  }, [callParticipants, isInCall, currentLeetCodeUsername, db, SHARED_ROOM_PATH]);
+  // Auto-connect logic removed - connections are now initiated in startVoiceCall
+  // with Perfect Negotiation pattern to handle collisions
 
   // Voice call state is now synced via the main room snapshot listener above
   // This listener is no longer needed as voiceCall is part of room data
