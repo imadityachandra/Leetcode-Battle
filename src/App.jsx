@@ -42,6 +42,7 @@ import {
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "firebase/auth";
 import { getFirestore, doc, setDoc, onSnapshot, getDoc, deleteField, collection, query, where, orderBy, limit, getDocs } from "firebase/firestore";
+import { SignalingTester } from "./utils/signalingTester";
 
 /**
  * ========== CONFIGURATION ==========
@@ -211,6 +212,10 @@ export default function App() {
       const firestore = getFirestore(app);
       const authentication = getAuth(app);
       setDb(firestore);
+      // EXPOSE FOR TESTING
+      window.db = firestore;
+      window.SignalingTester = SignalingTester;
+
       setAuth(authentication);
       setAppStatus("Authenticating...");
       const timeout = setTimeout(() => {
@@ -2135,19 +2140,27 @@ export default function App() {
       setCallParticipants(participants);
 
       // Create offer for each peer (only for users we don't have connections with)
+      // ALWAYS initiate when joining to prevent deadlocks
       for (const username of otherUsers) {
         // Skip if we already have a connection
         if (peerConnectionsRef.current.has(username)) {
+          console.log(`[Voice] Skipping ${username} - connection already exists`);
           continue;
         }
 
-        // Deterministic Initiator: Only initiate if my username < their username
-        // This prevents "glare" (collisions) where both sides try to offer at once.
-        if (currentLeetCodeUsername < username) {
-          console.log(`[Voice] Initiating connection to ${username} (I am initiator)`);
+        // Always initiate connection when joining a call
+        // This prevents deadlocks where both users wait for each other
+        console.log(`[Voice] Initiating connection to ${username}`);
+        try {
           const pc = createPeerConnection(username);
+          console.log(`[Voice] Created peer connection for ${username}`);
+
           const offer = await pc.createOffer();
+          console.log(`[Voice] Created offer for ${username}`);
+
           await pc.setLocalDescription(offer);
+          console.log(`[Voice] Set local description for ${username}, state: ${pc.signalingState}`);
+
           const offerDocId = `offer_${currentLeetCodeUsername}_${username}_${Date.now()}`;
           const roomDocRef = doc(db, SHARED_ROOM_PATH);
           const offerDocRef = doc(roomDocRef, 'voiceSignaling', offerDocId);
@@ -2158,8 +2171,9 @@ export default function App() {
             offer: { type: offer.type, sdp: offer.sdp },
             timestamp: Date.now()
           }, { merge: true });
-        } else {
-          console.log(`[Voice] Waiting for connection from ${username} (I am passive)`);
+          console.log(`[Voice] Sent offer to ${username} via Firebase`);
+        } catch (err) {
+          console.error(`[Voice] Error creating/sending offer to ${username}:`, err);
         }
       }
 
