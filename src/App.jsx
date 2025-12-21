@@ -42,6 +42,7 @@ import {
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "firebase/auth";
 import { getFirestore, doc, setDoc, onSnapshot, getDoc, deleteField, collection, query, where, orderBy, limit, getDocs } from "firebase/firestore";
+import { SignalingTester } from "./utils/signalingTester";
 
 /**
  * ========== CONFIGURATION ==========
@@ -184,6 +185,7 @@ export default function App() {
   const localStreamRef = useRef(null);
   const signalingChannelRef = useRef(null);
   const [audioUnlockNeeded, setAudioUnlockNeeded] = useState(false); // State to show unlock button if autoplay fails
+  const [debugInfo, setDebugInfo] = useState({}); // Map of username -> { connectionState, signalingState, iceCandidatesCount }
   const audioElementsRef = useRef(new Map()); // Map of username -> HTMLAudioElement
 
   // Firestore doc paths
@@ -210,6 +212,10 @@ export default function App() {
       const firestore = getFirestore(app);
       const authentication = getAuth(app);
       setDb(firestore);
+      // EXPOSE FOR TESTING
+      window.db = firestore;
+      window.SignalingTester = SignalingTester;
+
       setAuth(authentication);
       setAppStatus("Authenticating...");
       const timeout = setTimeout(() => {
@@ -2011,10 +2017,29 @@ export default function App() {
     // Handle connection state changes
     pc.onconnectionstatechange = () => {
       console.log(`[Voice] Connection state with ${username}:`, pc.connectionState);
+      setDebugInfo(prev => ({
+        ...prev,
+        [username]: {
+          ...(prev[username] || {}),
+          connectionState: pc.connectionState,
+          signalingState: pc.signalingState
+        }
+      }));
+
       if (pc.connectionState === 'failed') {
         // Only clean up on fatal failure, not temporary disconnection
         cleanupPeerConnection(username);
       }
+    };
+
+    pc.onsignalingstatechange = () => {
+      setDebugInfo(prev => ({
+        ...prev,
+        [username]: {
+          ...(prev[username] || {}),
+          signalingState: pc.signalingState
+        }
+      }));
     };
 
     peerConnectionsRef.current.set(username, pc);
@@ -2115,19 +2140,27 @@ export default function App() {
       setCallParticipants(participants);
 
       // Create offer for each peer (only for users we don't have connections with)
+      // ALWAYS initiate when joining to prevent deadlocks
       for (const username of otherUsers) {
         // Skip if we already have a connection
         if (peerConnectionsRef.current.has(username)) {
+          console.log(`[Voice] Skipping ${username} - connection already exists`);
           continue;
         }
 
-        // Deterministic Initiator: Only initiate if my username < their username
-        // This prevents "glare" (collisions) where both sides try to offer at once.
-        if (currentLeetCodeUsername < username) {
-          console.log(`[Voice] Initiating connection to ${username} (I am initiator)`);
+        // Always initiate connection when joining a call
+        // This prevents deadlocks where both users wait for each other
+        console.log(`[Voice] Initiating connection to ${username}`);
+        try {
           const pc = createPeerConnection(username);
+          console.log(`[Voice] Created peer connection for ${username}`);
+
           const offer = await pc.createOffer();
+          console.log(`[Voice] Created offer for ${username}`);
+
           await pc.setLocalDescription(offer);
+          console.log(`[Voice] Set local description for ${username}, state: ${pc.signalingState}`);
+
           const offerDocId = `offer_${currentLeetCodeUsername}_${username}_${Date.now()}`;
           const roomDocRef = doc(db, SHARED_ROOM_PATH);
           const offerDocRef = doc(roomDocRef, 'voiceSignaling', offerDocId);
@@ -2138,8 +2171,9 @@ export default function App() {
             offer: { type: offer.type, sdp: offer.sdp },
             timestamp: Date.now()
           }, { merge: true });
-        } else {
-          console.log(`[Voice] Waiting for connection from ${username} (I am passive)`);
+          console.log(`[Voice] Sent offer to ${username} via Firebase`);
+        } catch (err) {
+          console.error(`[Voice] Error creating/sending offer to ${username}:`, err);
         }
       }
 
@@ -4047,15 +4081,27 @@ export default function App() {
                           transition: "all 0.2s ease"
                         }}
                       >
-                        {isSpeakerMuted ? (
-                          <VolumeX className="icon" style={{ width: 14, height: 14 }} />
-                        ) : (
-                          <Volume2Icon className="icon" style={{ width: 14, height: 14 }} />
-                        )}
-                        {isSpeakerMuted ? "Unmute" : "Mute"} Speaker
+                        {isSpeakerMuted ? "Unmute Speaker" : "Mute Speaker"}
                       </button>
                     </div>
                   )}
+
+                  {/* Debug Panel */}
+                  {isInCall && (
+                    <div style={{ marginTop: "16px", padding: "10px", background: "#1f2937", borderRadius: "8px", fontSize: "10px", color: "#9ca3af" }}>
+                      <div style={{ fontWeight: "bold", marginBottom: "4px" }}>Voice Debug Info:</div>
+                      <div>My Username: {currentLeetCodeUsername}</div>
+                      <div>Participants: {callParticipants.join(", ")}</div>
+                      <div style={{ marginTop: "4px" }}>
+                        {Object.entries(debugInfo).map(([user, info]) => (
+                          <div key={user} style={{ marginBottom: "2px" }}>
+                            <span style={{ color: "#d1d5db" }}>{user}:</span> {info.connectionState || "unknown"} / {info.signalingState || "unknown"}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
 
                   {callParticipants.length > 0 && (
                     <div style={{ fontSize: "11px", color: "var(--muted)", marginTop: "4px" }}>
@@ -4462,19 +4508,21 @@ export default function App() {
             </div>
           </div>
         </div>
-      </div>
+      </div >
 
       <div id="burst-root" style={{ position: "absolute", inset: 0, pointerEvents: "none" }} />
 
-      {error && (
-        <div className="toast">
-          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-            <AlertTriangle className="icon" />
-            <div>{error}</div>
-            <button onClick={() => setError(null)} style={{ marginLeft: 8, border: 0, background: "transparent", color: "#6b7280", cursor: "pointer" }}>Dismiss</button>
+      {
+        error && (
+          <div className="toast">
+            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+              <AlertTriangle className="icon" />
+              <div>{error}</div>
+              <button onClick={() => setError(null)} style={{ marginLeft: 8, border: 0, background: "transparent", color: "#6b7280", cursor: "pointer" }}>Dismiss</button>
+            </div>
           </div>
-        </div>
-      )}
-    </div>
+        )
+      }
+    </div >
   );
 }
