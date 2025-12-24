@@ -946,16 +946,17 @@ export default function App() {
     }
   }, [friendUsernames, currentUserId, fetchWithRetry]);
 
-  // Auto-sync leaderboard when usernames are added or removed
+  // MANUAL SYNC ONLY - No auto-sync to avoid rate limiting
+  // Users must click "Sync Now" button to update leaderboard
   useEffect(() => {
-    // Only fetch if we have usernames and a user ID
-    if (friendUsernames.length > 0 && currentUserId) {
-      fetchAllUsersData();
-    } else if (friendUsernames.length === 0) {
-      // Clear leaderboard if no usernames
+    // Only clear leaderboard if no usernames
+    if (friendUsernames.length === 0) {
       setLeaderboardData([]);
+      setAppStatus("Add usernames to start");
+    } else {
+      setAppStatus("Click 'Sync Now' to update leaderboard");
     }
-  }, [friendUsernames, currentUserId, fetchAllUsersData]);
+  }, [friendUsernames]);
 
   /* ---------------------------
      Sorting
@@ -2801,84 +2802,63 @@ export default function App() {
               let latestSubmission = null;
               let latestTime = 0;
 
+              console.log(`[War Check] ========== Checking ${username} ==========`);
+              console.log(`[War Check] War problem slug: "${currentWar.problemSlug}"`);
+              console.log(`[War Check] War start time: ${new Date(currentWar.startTime).toISOString()}`);
+              console.log(`[War Check] Total submissions fetched: ${submission.length}`);
+
               for (const sub of submission) {
                 const submissionTime = parseInt(sub.timestamp || "0", 10) * 1000;
-
-                // Debug: Log submission details
-                if (submissionTime >= currentWar.startTime) {
-                  console.log(`[War Check] ${username} submission at ${new Date(submissionTime).toISOString()}: ${sub.title || sub.titleSlug || "Unknown"} - Status: ${sub.statusDisplay || sub.status || sub.statusCode}`);
-                }
 
                 // Only count submissions made during the war
                 if (submissionTime < currentWar.startTime) {
                   continue; // Skip submissions before war started
                 }
 
-                // Normalize both problem slug and submission slug for comparison
-                // Remove all special characters and normalize spaces/hyphens
+                // Log ALL submissions during war for debugging
+                console.log(`[War Check] ${username} submission:`, {
+                  time: new Date(submissionTime).toISOString(),
+                  title: sub.title,
+                  titleSlug: sub.titleSlug,
+                  status: sub.statusDisplay || sub.status || sub.statusCode,
+                  statusCode: sub.statusCode
+                });
+
+                // Normalize slugs for exact comparison
                 const normalizeSlug = (slug) => {
                   if (!slug) return "";
                   return slug.toLowerCase()
                     .trim()
-                    .replace(/[^a-z0-9-]/g, "-")  // Replace special chars with hyphens
-                    .replace(/-+/g, "-")          // Replace multiple hyphens with single
-                    .replace(/^-|-$/g, "");        // Remove leading/trailing hyphens
+                    .replace(/[^a-z0-9]/g, "");  // Remove ALL non-alphanumeric
                 };
 
-                const problemSlug = normalizeSlug(currentWar.problemSlug);
-                const warProblemTitle = normalizeSlug((currentWar.problemTitle || "").replace(/\s+/g, "-"));
-                const titleSlug = normalizeSlug(sub.titleSlug);
-                const submissionTitle = normalizeSlug((sub.title || "").replace(/\s+/g, "-"));
+                const warSlug = normalizeSlug(currentWar.problemSlug);
+                const subSlug = normalizeSlug(sub.titleSlug);
 
-                // Try multiple ways to match the problem
-                const slugMatch =
-                  // Exact matches (most reliable) - check slug to slug
-                  titleSlug === problemSlug ||
-                  // Check if submission title matches war problem title (if we have it)
-                  (warProblemTitle && submissionTitle && (warProblemTitle === submissionTitle || warProblemTitle.includes(submissionTitle) || submissionTitle.includes(warProblemTitle))) ||
-                  // Title slug contains problem slug or vice versa
-                  (titleSlug && problemSlug && (titleSlug.includes(problemSlug) || problemSlug.includes(titleSlug))) ||
-                  // Submission title matches problem slug
-                  (submissionTitle && problemSlug && (submissionTitle.includes(problemSlug) || problemSlug.includes(submissionTitle))) ||
-                  // Check if they share significant words (at least 2 words match)
-                  (() => {
-                    const slugWords = problemSlug.split("-").filter(w => w.length > 2);
-                    const titleWords = titleSlug.split("-").filter(w => w.length > 2);
-                    if (slugWords.length === 0 || titleWords.length === 0) return false;
-                    const matchingWords = slugWords.filter(word => titleWords.includes(word));
-                    return matchingWords.length >= Math.min(2, Math.min(slugWords.length, titleWords.length));
-                  })();
+                console.log(`[War Check] Comparing: "${warSlug}" vs "${subSlug}"`);
 
-                // Log all submissions during war for debugging
-                if (submissionTime >= currentWar.startTime) {
-                  console.log(`[War Check] 🔍 Checking match for ${username}:`, {
-                    originalProblemSlug: currentWar.problemSlug,
-                    normalizedProblemSlug: problemSlug,
-                    warProblemTitle: currentWar.problemTitle,
-                    normalizedWarTitle: warProblemTitle,
-                    submissionTitleSlug: sub.titleSlug,
-                    normalizedTitleSlug: titleSlug,
-                    submissionTitle: sub.title,
-                    normalizedSubmissionTitle: submissionTitle,
-                    slugMatch: slugMatch,
-                    status: sub.statusDisplay || sub.status || sub.statusCode,
-                    statusCode: sub.statusCode,
-                    timestamp: new Date(submissionTime).toISOString()
-                  });
-                }
+                // EXACT MATCH ONLY - most reliable
+                const slugMatch = warSlug === subSlug;
 
                 if (slugMatch) {
                   submissionCount++;
-                  console.log(`[War Check] ✓✓✓ MATCH FOUND for ${username}: ${sub.title || sub.titleSlug} - Status: ${sub.statusDisplay || sub.status || sub.statusCode} - Time: ${new Date(submissionTime).toISOString()}`);
+                  console.log(`[War Check] ✅ MATCH FOUND for ${username}!`);
+                  console.log(`[War Check] Problem: ${sub.title || sub.titleSlug}`);
+                  console.log(`[War Check] Status: ${sub.statusDisplay || sub.status || sub.statusCode}`);
+                  console.log(`[War Check] Time: ${new Date(submissionTime).toISOString()}`);
 
                   // Track the latest submission
                   if (submissionTime > latestTime) {
                     latestTime = submissionTime;
                     latestSubmission = sub;
-                    console.log(`[War Check] Updated latest submission for ${username} at ${new Date(latestTime).toISOString()}`);
+                    console.log(`[War Check] Updated latest submission for ${username}`);
                   }
+                } else {
+                  console.log(`[War Check] ❌ No match (different problem)`);
                 }
               }
+
+              console.log(`[War Check] ${username} total matching submissions: ${submissionCount}`);
 
               // Update submission count
               if (submissionCount > 0) {
@@ -3045,21 +3025,9 @@ export default function App() {
     // Store check function in ref for manual refresh
     checkSubmissionsRef.current = checkSubmissions;
 
-    // AUTOMATIC POLLING - Now safe with caching system
-    // Check submissions every 2 minutes during active war
-    console.log('[War Check] Starting automatic submission polling (2 minute interval)');
-
-    // Initial check after 10 seconds
-    const initialCheckTimeout = setTimeout(() => {
-      console.log('[War Check] Running initial submission check');
-      checkSubmissions();
-    }, 10000);
-
-    // Then check every 2 minutes
-    let checkInterval = setInterval(() => {
-      console.log('[War Check] Running scheduled submission check');
-      checkSubmissions();
-    }, 2 * 60 * 1000); // 2 minutes
+    // MANUAL REFRESH ONLY - No automatic polling to avoid rate limiting
+    // Users must click the "Check Submissions" button to update
+    console.log('[War Check] Submission checker ready (manual refresh only)');
 
     // Update ref when warState changes
     const updateRefOnChange = () => {
@@ -3068,8 +3036,6 @@ export default function App() {
     updateRefOnChange();
 
     return () => {
-      clearTimeout(initialCheckTimeout);
-      if (checkInterval) clearInterval(checkInterval);
       if (backoffTimeout) clearTimeout(backoffTimeout);
       checkSubmissionsRef.current = null; // Clear ref on cleanup
     };
@@ -4750,6 +4716,68 @@ export default function App() {
           </div>
         )
       }
+
+      {/* Footer with VibeCoded attribution */}
+      <div style={{
+        position: "fixed",
+        bottom: 0,
+        left: 0,
+        right: 0,
+        padding: "8px 16px",
+        background: "rgba(var(--card-rgb, 255, 255, 255), 0.8)",
+        backdropFilter: "blur(10px)",
+        borderTop: "1px solid var(--border)",
+        display: "flex",
+        justifyContent: "center",
+        alignItems: "center",
+        gap: "12px",
+        fontSize: "12px",
+        color: "var(--muted)",
+        zIndex: 100,
+        transition: "all 0.3s ease"
+      }}>
+        <span>Built with ❤️ using</span>
+        <a
+          href="https://vibecoded.com"
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{
+            color: "#06b6d4",
+            textDecoration: "none",
+            fontWeight: 600,
+            display: "flex",
+            alignItems: "center",
+            gap: "4px",
+            transition: "all 0.2s ease"
+          }}
+          onMouseEnter={(e) => {
+            e.target.style.color = "#7c3aed";
+            e.target.style.transform = "translateY(-1px)";
+          }}
+          onMouseLeave={(e) => {
+            e.target.style.color = "#06b6d4";
+            e.target.style.transform = "translateY(0)";
+          }}
+        >
+          <Zap style={{ width: 14, height: 14 }} />
+          VibeCoded
+        </a>
+        <span>•</span>
+        <a
+          href="https://github.com/imadityachandra/Leetcode-Battle"
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{
+            color: "var(--muted)",
+            textDecoration: "none",
+            transition: "color 0.2s ease"
+          }}
+          onMouseEnter={(e) => e.target.style.color = "var(--text)"}
+          onMouseLeave={(e) => e.target.style.color = "var(--muted)"}
+        >
+          GitHub
+        </a>
+      </div>
     </div >
   );
 }
