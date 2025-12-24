@@ -4767,68 +4767,6 @@ export default function App() {
           </div>
         )
       }
-
-      {/* Footer with VibeCoded attribution */}
-      <div style={{
-        position: "fixed",
-        bottom: 0,
-        left: 0,
-        right: 0,
-        padding: "8px 16px",
-        background: "rgba(var(--card-rgb, 255, 255, 255), 0.8)",
-        backdropFilter: "blur(10px)",
-        borderTop: "1px solid var(--border)",
-        display: "flex",
-        justifyContent: "center",
-        alignItems: "center",
-        gap: "12px",
-        fontSize: "12px",
-        color: "var(--muted)",
-        zIndex: 100,
-        transition: "all 0.3s ease"
-      }}>
-        <span>Built with ❤️ using</span>
-        <a
-          href="https://vibecoded.com"
-          target="_blank"
-          rel="noopener noreferrer"
-          style={{
-            color: "#06b6d4",
-            textDecoration: "none",
-            fontWeight: 600,
-            display: "flex",
-            alignItems: "center",
-            gap: "4px",
-            transition: "all 0.2s ease"
-          }}
-          onMouseEnter={(e) => {
-            e.target.style.color = "#7c3aed";
-            e.target.style.transform = "translateY(-1px)";
-          }}
-          onMouseLeave={(e) => {
-            e.target.style.color = "#06b6d4";
-            e.target.style.transform = "translateY(0)";
-          }}
-        >
-          <Zap style={{ width: 14, height: 14 }} />
-          VibeCoded
-        </a>
-        <span>•</span>
-        <a
-          href="https://github.com/imadityachandra/Leetcode-Battle"
-          target="_blank"
-          rel="noopener noreferrer"
-          style={{
-            color: "var(--muted)",
-            textDecoration: "none",
-            transition: "color 0.2s ease"
-          }}
-          onMouseEnter={(e) => e.target.style.color = "var(--text)"}
-          onMouseLeave={(e) => e.target.style.color = "var(--muted)"}
-        >
-          GitHub
-        </a>
-      </div>
     </div >
   );
 }
