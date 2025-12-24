@@ -1196,11 +1196,19 @@ export default function App() {
       }
 
       // Sanitize room name to prevent XSS and ensure valid characters
-      const rawName = (roomName || newRoomName).trim();
-      const name = sanitizeRoomName(rawName);
+      const rawName = roomName || newRoomName || "";
+      if (!rawName || typeof rawName !== 'string') {
+        const errorMsg = "Room name is required";
+        console.error('[Room Creation]', errorMsg);
+        setError(errorMsg);
+        setTimeout(() => setError(null), 3000);
+        return;
+      }
+
+      const name = sanitizeRoomName(rawName.trim());
 
       if (!name || name.length === 0) {
-        const errorMsg = "Room name is required and must contain valid characters";
+        const errorMsg = "Room name must contain valid characters";
         console.error('[Room Creation]', errorMsg);
         setError(errorMsg);
         setTimeout(() => setError(null), 3000);
