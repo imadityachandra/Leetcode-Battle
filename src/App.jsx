@@ -1196,11 +1196,19 @@ export default function App() {
       }
 
       // Sanitize room name to prevent XSS and ensure valid characters
-      const rawName = (roomName || newRoomName).trim();
-      const name = sanitizeRoomName(rawName);
+      const rawName = roomName || newRoomName || "";
+      if (!rawName || typeof rawName !== 'string') {
+        const errorMsg = "Room name is required";
+        console.error('[Room Creation]', errorMsg);
+        setError(errorMsg);
+        setTimeout(() => setError(null), 3000);
+        return;
+      }
+
+      const name = sanitizeRoomName(rawName.trim());
 
       if (!name || name.length === 0) {
-        const errorMsg = "Room name is required and must contain valid characters";
+        const errorMsg = "Room name must contain valid characters";
         console.error('[Room Creation]', errorMsg);
         setError(errorMsg);
         setTimeout(() => setError(null), 3000);
@@ -2488,10 +2496,53 @@ export default function App() {
         if (data.type === 'offer' && data.offer) {
           console.log(`[Voice] Received offer from ${fromUser}`);
 
-          // Create peer connection if it doesn't exist
+          // CRITICAL FIX: If we're not in a call yet, we need to join first
+          // This ensures we have our local stream before creating peer connection
+          if (!isInCall || !localStreamRef.current) {
+            console.log(`[Voice] Not in call yet, auto-joining to accept offer from ${fromUser}`);
+
+            try {
+              // Get user media first
+              const stream = await getUserMedia();
+              if (!stream) {
+                console.error(`[Voice] Failed to get user media, cannot accept offer from ${fromUser}`);
+                return;
+              }
+
+              // Mark as in call
+              setIsInCall(true);
+
+              // Update Firebase to add ourselves to participants
+              const roomDoc = await getDoc(doc(db, SHARED_ROOM_PATH));
+              const existingCall = roomDoc.exists() ? roomDoc.data()?.voiceCall : null;
+              const participants = existingCall?.participants || [];
+
+              if (!participants.includes(currentLeetCodeUsername)) {
+                participants.push(currentLeetCodeUsername);
+                await setDoc(doc(db, SHARED_ROOM_PATH), {
+                  voiceCall: {
+                    active: true,
+                    participants: participants,
+                    startedBy: existingCall?.startedBy || fromUser,
+                    startedAt: existingCall?.startedAt || Date.now(),
+                    lastUpdated: Date.now()
+                  }
+                }, { merge: true });
+              }
+
+              setCallParticipants(participants);
+              console.log(`[Voice] Auto-joined call, now have local stream`);
+            } catch (err) {
+              console.error(`[Voice] Error auto-joining call:`, err);
+              return;
+            }
+          }
+
+          // Now create peer connection (will have local stream)
           let pc = peerConnectionsRef.current.get(fromUser);
           if (!pc) {
             pc = createPeerConnection(fromUser);
+            console.log(`[Voice] Created peer connection for ${fromUser} (has local stream: ${!!localStreamRef.current})`);
           }
 
           try {
