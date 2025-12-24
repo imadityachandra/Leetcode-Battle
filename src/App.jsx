@@ -2827,8 +2827,13 @@ export default function App() {
 
             console.log(`[War Check] Fetching submissions for ${username} with limit=${estimatedLimit} (war started ${Math.round(warDurationMinutes)} minutes ago)`);
             // Use shorter TTL for submissions (30 seconds) since they change frequently during wars
-            const submission = await fetchWithRetry(`${API_BASE_URL}/${username}/submission?limit=${estimatedLimit}`, { ttl: 30000 });
+            const submissionResponse = await fetchWithRetry(`${API_BASE_URL}/${username}/submission?limit=${estimatedLimit}`, { ttl: 30000 });
 
+            // Extract submission array from response object
+            // API returns: { count: N, submission: [...] }
+            const submission = Array.isArray(submissionResponse)
+              ? submissionResponse
+              : (submissionResponse?.submission || []);
 
             if (submission && Array.isArray(submission) && submission.length > 0) {
               console.log(`[War Check] Fetched ${submission.length} submissions for ${username} (requested ${estimatedLimit})`);
