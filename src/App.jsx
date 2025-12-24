@@ -2827,8 +2827,13 @@ export default function App() {
 
             console.log(`[War Check] Fetching submissions for ${username} with limit=${estimatedLimit} (war started ${Math.round(warDurationMinutes)} minutes ago)`);
             // Use shorter TTL for submissions (30 seconds) since they change frequently during wars
-            const submission = await fetchWithRetry(`${API_BASE_URL}/${username}/submission?limit=${estimatedLimit}`, { ttl: 30000 });
+            const submissionResponse = await fetchWithRetry(`${API_BASE_URL}/${username}/submission?limit=${estimatedLimit}`, { ttl: 30000 });
 
+            // Extract submission array from response object
+            // API returns: { count: N, submission: [...] }
+            const submission = Array.isArray(submissionResponse)
+              ? submissionResponse
+              : (submissionResponse?.submission || []);
 
             if (submission && Array.isArray(submission) && submission.length > 0) {
               console.log(`[War Check] Fetched ${submission.length} submissions for ${username} (requested ${estimatedLimit})`);
@@ -4767,68 +4772,6 @@ export default function App() {
           </div>
         )
       }
-
-      {/* Footer with VibeCoded attribution */}
-      <div style={{
-        position: "fixed",
-        bottom: 0,
-        left: 0,
-        right: 0,
-        padding: "8px 16px",
-        background: "rgba(var(--card-rgb, 255, 255, 255), 0.8)",
-        backdropFilter: "blur(10px)",
-        borderTop: "1px solid var(--border)",
-        display: "flex",
-        justifyContent: "center",
-        alignItems: "center",
-        gap: "12px",
-        fontSize: "12px",
-        color: "var(--muted)",
-        zIndex: 100,
-        transition: "all 0.3s ease"
-      }}>
-        <span>Built with ❤️ using</span>
-        <a
-          href="https://vibecoded.com"
-          target="_blank"
-          rel="noopener noreferrer"
-          style={{
-            color: "#06b6d4",
-            textDecoration: "none",
-            fontWeight: 600,
-            display: "flex",
-            alignItems: "center",
-            gap: "4px",
-            transition: "all 0.2s ease"
-          }}
-          onMouseEnter={(e) => {
-            e.target.style.color = "#7c3aed";
-            e.target.style.transform = "translateY(-1px)";
-          }}
-          onMouseLeave={(e) => {
-            e.target.style.color = "#06b6d4";
-            e.target.style.transform = "translateY(0)";
-          }}
-        >
-          <Zap style={{ width: 14, height: 14 }} />
-          VibeCoded
-        </a>
-        <span>•</span>
-        <a
-          href="https://github.com/imadityachandra/Leetcode-Battle"
-          target="_blank"
-          rel="noopener noreferrer"
-          style={{
-            color: "var(--muted)",
-            textDecoration: "none",
-            transition: "color 0.2s ease"
-          }}
-          onMouseEnter={(e) => e.target.style.color = "var(--text)"}
-          onMouseLeave={(e) => e.target.style.color = "var(--muted)"}
-        >
-          GitHub
-        </a>
-      </div>
     </div >
   );
 }
